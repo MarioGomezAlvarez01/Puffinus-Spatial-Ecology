@@ -113,25 +113,68 @@ the analysis via Monte Carlo resampling inside `estMC()`.
 
 ## Calibration Error Parameters
 
+GLS positional error is estimated empirically by comparing device-estimated
+positions (from `all_trips`) against the known colony coordinates during the
+stationary period when each migrant was at the breeding site — i.e. **before**
+departure (`BA_dep_date`) and, where available, **after** return (`BA_arr_date`).
+Only individuals classified as migrants in `phen_data` are used.
+
 ```{r gls-error}
-# Equinox bias (lon, lat) in degrees — derived from stationary calibration fixes
-gls_bias <- c(lon = 0.0, lat = -1.3)
+# Load phenological data; retain migrants with known departure dates
+phen_migrants <- read.csv("Phen_data.csv") %>%
+  filter(Migration == "Migrant", !is.na(BA_dep_date)) %>%
+  mutate(
+    BA_dep_dt = as.POSIXct(BA_dep_date, format = "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"),
+    BA_arr_dt = as.POSIXct(BA_arr_date, format = "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
+  ) %>%
+  select(geo_trip, BA_dep_dt, BA_arr_dt)
 
-# 2×2 covariance matrix for bivariate normal GLS error
-gls_sd_lon <- 0.98   # longitudinal SD (degrees)
-gls_sd_lat <- 1.52   # latitudinal SD (degrees)
-gls_cor    <- 0.10   # correlation between lon and lat errors
+# Load raw tracking positions and parse datetime
+all_trips_raw <- read.csv("all_trips.csv") %>%
+  mutate(Date_Time = as.POSIXct(Date_Time, tz = "UTC"))
 
-gls_cov <- matrix(
-  c(gls_sd_lon^2,
-    gls_cor * gls_sd_lon * gls_sd_lat,
-    gls_cor * gls_sd_lon * gls_sd_lat,
-    gls_sd_lat^2),
-  nrow = 2, byrow = TRUE,
-  dimnames = list(c("lon", "lat"), c("lon", "lat"))
+# True colony coordinates
+colony_coords <- read.csv("colonies_coords.csv") %>%
+  select(Colony, colony_lon = Lon, colony_lat = Lat)
+
+# Keep only calibration-period positions:
+#   - BEFORE departure from the breeding area (bird still at colony), OR
+#   - AFTER return to the breeding area (bird back at colony).
+#   Positions recorded during the actual migration trip are excluded because
+#   the bird is no longer at a known location.
+calib_pts <- all_trips_raw %>%
+  inner_join(phen_migrants, by = "geo_trip") %>%
+  filter(
+    Date_Time < BA_dep_dt |
+    (!is.na(BA_arr_dt) & Date_Time > BA_arr_dt)
+  ) %>%
+  left_join(colony_coords, by = "Colony") %>%
+  filter(!is.na(colony_lon)) %>%
+  mutate(
+    res_lon = Lon - colony_lon,
+    res_lat = Lat - colony_lat
+  )
+
+cat(sprintf("Calibration positions: %d from %d individuals\n",
+            nrow(calib_pts), n_distinct(calib_pts$geo_trip)))
+
+# GLS bias: mean residual per axis
+gls_bias <- c(
+  lon = mean(calib_pts$res_lon, na.rm = TRUE),
+  lat = mean(calib_pts$res_lat, na.rm = TRUE)
 )
 
-cat("GLS bias (lon, lat):", gls_bias, "\n")
+# 2×2 covariance matrix of the bivariate GLS error
+gls_cov <- cov(calib_pts[, c("res_lon", "res_lat")])
+dimnames(gls_cov) <- list(c("lon", "lat"), c("lon", "lat"))
+
+gls_sd_lon <- sqrt(gls_cov["lon", "lon"])
+gls_sd_lat <- sqrt(gls_cov["lat", "lat"])
+gls_cor    <- gls_cov["lon", "lat"] / (gls_sd_lon * gls_sd_lat)
+
+cat("GLS bias (lon, lat):", round(gls_bias, 3), "\n")
+cat(sprintf("GLS SD  lon: %.3f°   lat: %.3f°   correlation: %.3f\n",
+            gls_sd_lon, gls_sd_lat, gls_cor))
 cat("GLS covariance matrix:\n")
 print(round(gls_cov, 4))
 ```
@@ -335,10 +378,18 @@ colonies <- read.csv("colonies_coords.csv") %>%
     taxon = if_else(site_id %in% PUFMAU_pops, "PUFMAU", "PUFYEL")
   )
 
+# Migrant geo_trip IDs from phen_data — connectivity analysis uses migrants only
+migrant_ids <- read.csv("Phen_data.csv") %>%
+  filter(Migration == "Migrant") %>%
+  pull(geo_trip)
+
 # Geolocator tracking data — individual wintering centroids
 # Computed as the mean position during the core non-breeding months (Nov–Feb)
+# Restricted to migrant individuals identified via phen_data
 tracking <- read.csv("all_trips.csv") %>%
-  filter(!is.na(Lon), !is.na(Lat), month %in% c(11, 12, 1, 2)) %>%
+  filter(geo_trip %in% migrant_ids,          # migrants only (most selective first)
+         !is.na(Lon), !is.na(Lat),
+         month %in% c(11, 12, 1, 2)) %>%
   group_by(geo_trip, Population) %>%
   summarise(
     lon_win = mean(Lon, na.rm = TRUE),
@@ -360,7 +411,7 @@ tracking <- read.csv("all_trips.csv") %>%
     )
   )
 
-cat(sprintf("Tracking records: %d individuals across %d populations\n",
+cat(sprintf("Tracking records: %d migrants across %d populations\n",
             nrow(tracking), n_distinct(tracking$population)))
 ```
 
@@ -410,10 +461,10 @@ cat(" Taxon level: ", nrow(originSites_taxon), "polygons\n")
 
 ## Target Sites
 
-Non-breeding (wintering) areas are defined as pre-specified geographic
-rectangles covering the main regions used by Mediterranean shearwaters
-during the non-breeding season. Adjust these boundaries to match your
-original study definitions.
+Non-breeding (wintering) target regions correspond directly to the **WA** (wintering
+area) categories recorded in `phen_data` for the original study. The eight named
+regions are: Alboran Sea, Western Mediterranean, Central Mediterranean, Adriatic Sea,
+Aegean Sea, Black Sea, Saharan Upwelling, and South European Atlantic Shelf.
 
 ```{r target-sites}
 # Helper to build a rectangular sf polygon from bounding coordinates
@@ -424,31 +475,32 @@ make_rect <- function(xmin, xmax, ymin, ymax, crs = CRS_GEO) {
   )
 }
 
+# Target zones match the WA column in phen_data (original study regions).
+# All coordinates are in decimal degrees (WGS84).
 targetSites <- tibble::tribble(
-  ~zone_id,     ~xmin, ~xmax, ~ymin, ~ymax,
-  # Bay of Biscay / NE Atlantic shelf (important post-breeding staging area)
-  "BAY_BISCAY", -10,    -1,   44,    50,
-  # Atlantic off the Iberian Peninsula (Balearic shearwater core wintering area;
-  # Guilford et al. 2012, Arcos et al. 2012)
-  "ATL_IBERIA", -18,   -10,   36,    44,
-  # Canary / Madeira upwelling — used by both taxa
-  "ATL_CANARY", -22,   -12,   26,    36,
-  # Atlantic off NW Africa (Mauritania–Senegal productive waters)
-  "ATL_WAF",    -22,   -12,   15,    26,
-  # Western Mediterranean (main Yelkouan wintering area; Müller et al. 2015)
-  "W_MED",       -5,    10,   36,    44,
-  # Central Mediterranean (Adriatic + Tyrrhenian seas)
-  "C_MED",       10,    20,   34,    42,
-  # Eastern Mediterranean (Ionian + Aegean + Levantine seas)
-  "E_MED",       20,    36,   30,    42
+  ~site_id,                          ~xmin,  ~xmax, ~ymin, ~ymax,
+  # Atlantic shelf off the Iberian Peninsula and Bay of Biscay
+  "South European Atlantic Shelf",  -15.0,    0.0,  35.0,  52.0,
+  # Upwelling zone off NW Africa (Mauritania – Morocco)
+  "Saharan Upwelling",              -20.0,   -8.0,  20.0,  34.0,
+  # Narrow sea between Iberia and NW Africa, west of 1.5°E
+  "Alboran Sea",                     -5.5,    1.5,  34.0,  37.0,
+  # Gulf of Lion, Ligurian and Balearic seas
+  "Western Mediterranean",            1.5,   15.0,  36.0,  44.5,
+  # Tyrrhenian and northern Ionian seas
+  "Central Mediterranean",           10.0,   18.5,  33.0,  39.5,
+  # Semi-enclosed sea between the Italian and Balkan peninsulas
+  "Adriatic Sea",                    12.5,   20.5,  39.0,  46.5,
+  # Sea between mainland Greece and Anatolia
+  "Aegean Sea",                      21.5,   28.5,  35.0,  42.0,
+  # Enclosed sea north of Anatolia
+  "Black Sea",                       27.5,   42.0,  40.5,  47.0
 ) %>%
-  # NOTE: Replace these boundaries with your original study definitions if they differ.
   rowwise() %>%
   mutate(geometry = make_rect(xmin, xmax, ymin, ymax)) %>%
   ungroup() %>%
   st_as_sf(crs = CRS_GEO) %>%
-  select(zone_id, geometry) %>%
-  rename(site_id = zone_id)
+  select(site_id, geometry)
 
 cat("Target sites defined:", nrow(targetSites), "wintering zones\n")
 print(targetSites$site_id)
