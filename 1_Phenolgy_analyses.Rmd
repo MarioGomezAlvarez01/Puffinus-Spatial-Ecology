@@ -1,7 +1,6 @@
 ---
-title: "Phenological Timing and Lunar Cycles Across Colonies"
-subtitle: "Statistical Analyses for Diversity and Distribution Study"
-author: "Diego Vicente-Sastre & Mario Gómez Álvarez"
+title: "Phenological Analyses Across Populations"
+author: "Mario Gómez Álvarez"
 date: "`r Sys.Date()`"
 output:
   html_document:
@@ -19,51 +18,41 @@ knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
 Sys.setenv(TZ = 'GMT')
 ```
 
-# Introduction
-
-This document analyzes phenological timing (arrival and departure dates) of Puffinus species across Mediterranean colonies in relation to lunar illumination cycles. We examine whether lunar phases influence the timing of breeding and non-breeding periods.
-
-# Methods
-
 ## 1. Data Preparation and Packages
 
 ```{r packages}
 # Load required packages
 packages <- c('readxl', 'readr', 'stringr', 'lubridate', 'ggplot2',
               'purrr', 'tidyverse', 'tibble', 'openxlsx', 'lme4', 
-              'nlme', 'ggpubr', 'MuMIn', 'corrplot', 'lunar', 
-              'suncalc', 'dplyr', 'emmeans', 'ggeffects')
+              'ggpubr', 'MuMIn', 'corrplot', 'lunar','suncalc', 
+              'dplyr', 'emmeans')
 
 invisible(lapply(packages, library, character.only = TRUE))
+
+Data <- read.csv("Phen_data.csv")
 ```
 
-## 2. Lunar Illumination Calculations
+## 2. Data Transformation
 
-```{r lunar_illumination}
-# Function to calculate lunar illumination for a set of dates
-calculate_lunar_illumination <- function(dates) {
-  fechas_convertidas <- as.POSIXct(dates[!is.na(dates)], 
-                                   format = "%Y-%m-%dT%H:%M:%SZ", 
-                                   tz = "UTC")
-  sapply(fechas_convertidas, lunar::lunar.illumination)
+```{r data_transformation}
+# Unify dates and calculate phenological variables
+Data <- Data %>%
+  mutate(
+    WA_arr_date = coalesce(WA50_B_arr_date, WA50_A_arr_date),
+    WA_dep_date = coalesce(WA50_B_dep_date, WA50_A_dep_date)
+  ) %>%
+  mutate(
+    BA_arr_jul = calculate_julian_vec(BA50_arr_date),
+    BA_dep_jul = calculate_julian_vec(BA50_dep_date),
+    WA_arr_jul = calculate_julian_vec(WA_arr_date),
+    WA_dep_jul = calculate_julian_vec(WA_dep_date)
+  ) %>%
+  mutate(
+    across(ends_with("_jul",
+           ~ ifelse(. < 0, . + 365, .))
+  )
 }
 
-# Apply to all date columns
-Data$moon_dep_BA <- NA
-Data$moon_dep_BA[!is.na(Data$BA50_dep_date)] <- 
-  calculate_lunar_illumination(Data$BA50_dep_date)
-
-Data$moon_arr_BA <- NA
-Data$moon_arr_BA[!is.na(Data$BA50_arr_date)] <- 
-  calculate_lunar_illumination(Data$BA50_arr_date)
-
-Data$moon_dep_WA <- NA
-Data$moon_dep_WA[!is.na(Data$WA50_A_dep_date)] <- 
-  calculate_lunar_illumination(Data$WA50_A_dep_date)
-
-Data$moon_arr_WA <- NA
-Data$moon_arr_WA[!is.na(Data$WA50_A_arr_date)] <- 
-  calculate_lunar_illumination(Data$WA50_A_arr_date)
 ```
 
 ## 3. Julian Date Calculations
@@ -89,33 +78,42 @@ calculate_julian_from_moon <- function(fecha) {
 
 # Vectorized version
 calculate_julian_vec <- Vectorize(calculate_julian_from_moon)
+
 ```
 
-## 4. Data Transformation
+## 3. Lunar Illumination Calculations
 
-```{r data_transformation}
-# Unify dates and calculate phenological variables
-Data <- Data %>%
-  mutate(
-    WA_arr_date = coalesce(WA50_B_arr_date, WA50_A_arr_date),
-    WA_dep_date = coalesce(WA50_B_dep_date, WA50_A_dep_date)
-  ) %>%
-  mutate(
-    BA_arr_jul = calculate_julian_vec(BA50_arr_date),
-    BA_dep_jul = calculate_julian_vec(BA50_dep_date),
-    WA_arr_jul = calculate_julian_vec(WA_arr_date),
-    WA_dep_jul = calculate_julian_vec(WA_dep_date)
-  ) %>%
-  mutate(
-    across(ends_with("_jul",
-           ~ ifelse(. < 0, . + 365, .))
-  )
+```{r lunar_illumination}
+
+# Function to calculate lunar illumination for a set of dates
+calculate_lunar_illumination <- function(dates) {
+  dates_converted <- as.POSIXct(dates[!is.na(dates)], 
+                                format = "%Y-%m-%dT%H:%M:%SZ", 
+                                tz = "UTC")
+  sapply(dates_converted, lunar::lunar.illumination)
 }
+
+# Apply to all date columns
+Data$moon_dep_BA <- NA
+Data$moon_dep_BA[!is.na(Data$BA_dep_date)] <- 
+  calculate_lunar_illumination(Data$BA_dep_date)
+
+Data$moon_arr_BA <- NA
+Data$moon_arr_BA[!is.na(Data$BA_arr_date)] <- 
+  calculate_lunar_illumination(Data$BA_arr_date)
+
+Data$moon_dep_WA <- NA
+Data$moon_dep_WA[!is.na(Data$WA_dep_date)] <- 
+  calculate_lunar_illumination(Data$WA_dep_date)
+
+Data$moon_arr_WA <- NA
+Data$moon_arr_WA[!is.na(Data$WA_arr_date)] <- 
+  calculate_lunar_illumination(Data$WA_arr_date)
 ```
 
 # Statistical Models
 
-We fitted linear mixed-effects models (LMEM) to test the effects of colony and lunar illumination on phenological timing, with random intercepts for individual Ring IDs and year of departure.
+We fitted linear mixed-effects models (LMM) to test the effects of colony and lunar illumination on phenological timing, with random intercepts for individual Ring IDs and year of departure.
 
 ## Model Fitting
 
@@ -241,6 +239,41 @@ data_lunar <- data.frame(
 ) %>%
   filter(iluminacion > 0.997) %>%
   mutate(fecha = seq(0, 365, length.out = n()))
+ 
+# Prepare matrix with breeding and non-breeding periods in julian dates
+t.list <- list()
+for(i in seq(from=1, to= 8, by = 1)){
+  #i=1
+  t0 <- 1
+  t1 <- emm_BA_dep$emmean[i]   #breeding
+  t2 <- emm_BA_arr$emmean[i]   #nonbreeding
+  t3 <- 365
+  t <- as.matrix(c(t0,t1,t2,t3))
+  t.list[i] <- list(t)
+}
+
+t.list <- Filter(Negate(is.null),t.list)
+periodes <- do.call(rbind.data.frame, t.list)
+
+# Annotate populations
+periodes$condition[1:4] <- 'Ibiza'
+periodes$condition[5:8] <- 'Mallorca'
+periodes$condition[9:12] <- 'Minorca'
+periodes$condition[13:16] <- 'France'
+periodes$condition[17:20] <- 'Sardinia'
+periodes$condition[21:24] <- 'Malta'
+periodes$condition[25:28] <- 'Croatia'
+periodes$condition[29:32] <- 'Greece'
+
+# Create df for gg_vistime
+time.line <- data.frame(start = periodes$V1[1:31], 
+                        end = periodes$V1[2:32])%>%
+  filter(!(row_number() == 4 | row_number() %% 4 == 0))%>% #Treiem les entrades amb 365 dies julians
+  mutate(event = base::rep(c('B1','W','B2'), length.out = 24))%>% #Definim periodes
+  mutate(color = base::rep(c("darkolivegreen4","darkorchid","darkolivegreen4"), length.out = 24))%>%
+  mutate(group= c(periodes$condition[1:3],periodes$condition[5:7],periodes$condition[9:11],
+                  periodes$condition[13:15],periodes$condition[17:19], periodes$condition[21:23],
+                  periodes$condition[25:27], periodes$condition[29:31])) 
 ```
 
 ```{r timeline_plot, fig.width=10, fig.height=6}
@@ -269,16 +302,6 @@ timeline_plot <- ggplot(time.line, aes(x = start, xend = end, y = group, yend = 
 
 print(timeline_plot)
 ```
-
-# Discussion
-
-The analysis reveals colony-specific variation in phenological timing across the eight Mediterranean colonies studied. Lunar illumination showed variable effects on the timing of arrival and departure events. The visualization indicates that full moon nights (marked with dashed vertical lines) coincide with specific periods in the annual cycle, suggesting a potential influence of lunar cycles on migration and breeding behavior.
-
-Key findings:
-- Phenological timing varies significantly among colonies
-- Lunar illumination effects differ by event type and colony
-- Full moon nights show clustering with specific life cycle events
-
 # Export Results
 
 ```{r export}
@@ -286,9 +309,8 @@ Key findings:
 write_tsv(summary_table, "phenology_estimates.tsv")
 
 # Save visualization
-ggsave("timeline_lunar_cycles.png", timeline_plot, width = 10, height = 6, dpi = 300)
+ggsave("timeline_lunar_cycles.png", timeline_plot, width = 10, height = 6, dpi = 600)
 
-cat("Results exported successfully!")
 ```
 
 # Session Information
