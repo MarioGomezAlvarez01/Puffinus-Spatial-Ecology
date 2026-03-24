@@ -157,7 +157,7 @@ wrld <- rworldmap::getMap(resolution = "high")
 sf_wrld <- st_as_sf(wrld) %>% st_transform(CRS_PROJ)
 
 # Colonies coordinates
-colonies <- read_excel('colonies_coords.csv')
+colonies <- read.csv('colonies_coords.csv')
 
 # Convert to sf object
 origin_sf <- st_as_sf(colonies, coords = c("Lon", "Lat"), crs = CRS_PROJ)
@@ -178,21 +178,29 @@ pop_order_lower <- tolower(pop_order)
 individual_k5 <- trips_balanced_ind %>%
   group_split(geo_trip) %>%
   map_dfr(function(df) {
-    coords <- df[, c("Lon", "Lat")]
-    sp_pts <- SpatialPoints(coords, proj4string = CRS("+proj=longlat +datum=WGS84"))
-
-    kde_ind <- kernelUD(sp_pts, h = BANDWIDTH, grid = 100)
-    ver_5 <- st_as_sf(getverticeshr(kde_ind, percent = 5))
-
-    centroid <- st_centroid(ver_5) %>%
-      mutate(
-        geo_trip = unique(df$geo_trip),
-        Pop = unique(df$Population),
-        Group = unique(df$Group)
-      ) %>%
-      select(geo_trip, Pop, Group)
-
-    return(centroid)
+    
+    tryCatch({
+      coords <- df[, c("Lon", "Lat")] %>% distinct()
+      
+      sp_pts <- SpatialPoints(coords, proj4string = CRS("+proj=longlat +datum=WGS84"))
+      
+      kde_ind <- kernelUD(sp_pts, h = BANDWIDTH, grid = 100)
+      ver_5 <- st_as_sf(getverticeshr(kde_ind, percent = 5)) %>%
+        st_make_valid()
+      
+      centroid <- st_centroid(ver_5) %>%
+        mutate(
+          geo_trip = unique(df$geo_trip),
+          Pop = unique(df$Population),
+          Group = unique(df$Group)
+        ) %>%
+        select(geo_trip, Pop, Group)
+      
+      return(centroid)
+      
+    }, error = function(e) {
+      return(NULL)
+    })
   })
 
 cat("Individual activity centers calculated:", nrow(individual_k5), "individuals\n")
@@ -207,7 +215,7 @@ cat("Individual activity centers calculated:", nrow(individual_k5), "individuals
 group_order <- c('WesternMost', 'Central-West', 'Central-East', 'EasternMost')
 
 # Apply to all objects
-origin_sf$Pop <- factor(origin_sf$Pop, levels = pop_order_lower)
+origin_sf$Pop <- factor(toupper(origin_sf$Pop), levels = pop_order)
 origin_sf$Group <- factor(origin_sf$Group, levels = group_order)
 
 individual_k5$Pop <- factor(individual_k5$Pop, levels = pop_order)
@@ -268,7 +276,7 @@ ggsave(
   width = 210,
   height = 150,
   units = "mm",
-  dpi = 300,
+  dpi = 600,
   bg = "white"
 )
 
@@ -306,7 +314,7 @@ names(ver_50_pop)[1] <- "Pop"
 ver_90_pop$Pop <- factor(toupper(ver_90_pop$Pop), levels = pop_order)
 ver_50_pop$Pop <- factor(toupper(ver_50_pop$Pop), levels = pop_order)
 individual_k5$Pop <- factor(toupper(individual_k5$Pop), levels = pop_order)
-origin_sf$Pop <- factor(toupper(origin_sf$Pop), levels = pop_order_lower)
+origin_sf$Pop <- factor(toupper(origin_sf$Pop), levels = pop_order)
 
 cat("Population-level KDE calculated successfully\n")
 ```
