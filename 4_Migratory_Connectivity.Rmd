@@ -1,0 +1,79 @@
+---
+title: "Migratory Connectivity Analysis"
+author: "Mario Gomez Alvarez"
+date: "2026-03-24"
+output: html_document
+---
+
+# Setup
+
+```{r setup, include=FALSE}
+library(ggplot2)
+library(dplyr)
+library(circular)
+library(geosphere)
+
+# Set random seed for reproducibility
+set.seed(123)
+```
+
+# Methods
+
+### Geolocator Error Estimation
+
+```{r geolocator-error-estimation}
+# Sample code for geolocator error estimation
+# Assuming 'locations' is a dataframe with geolocator data
+locations <- data.frame(
+  longitude = runif(100, -180, 180),
+  latitude = runif(100, -90, 90)
+)
+
+# Example calculation of the mean location error
+mean_error <- mean(distHaversine(locations[, c('longitude', 'latitude')]))
+print(mean_error)
+```
+
+### Marine Distance Calculations
+
+```{r marine-distance-calculations}
+# Sample code for marine distance calculations
+library(geosphere)
+
+# Example points
+start_point <- c(-74, 40)
+end_point <- c(-73, 41)
+
+# Calculate marine distance
+marine_distance <- distHaversine(start_point, end_point)
+print(marine_distance)
+```
+
+### MC Analysis at Taxa Level
+
+```{r mc-analysis-taxa-level}
+# Sample MC analysis code
+# Assuming df is the dataframe with taxa data
+# df <- data.frame(taxa = c('A', 'B'), connectivity = c(0.1, 0.2))
+
+# Example analysis
+mc_analysis <- df %>% group_by(taxa) %>% summarise(mean_connectivity = mean(connectivity))
+print(mc_analysis)
+```
+
+### Circular Plot Visualization
+
+```{r circular-plot-visualization}
+# Sample code for circular plot visualization
+# Creating a circular plot of some example data
+
+# Sample data
+angles <- circular(runif(100, 0, 2 * pi))
+
+# Plot circular data
+plot(angles, main = "Circular Plot Visualization", cex=0.5)
+```
+
+# Conclusion
+
+In this analysis, we explored various aspects of migratory connectivity through geolocator analysis, marine distance calculations, and taxa level connectivity analysis, illustrated with circular plots.
