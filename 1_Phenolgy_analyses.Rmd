@@ -30,32 +30,10 @@ packages <- c('readxl', 'readr', 'stringr', 'lubridate', 'ggplot2',
 invisible(lapply(packages, library, character.only = TRUE))
 
 Data <- read.csv("Phen_data.csv")
-```
-
-## 2. Data Transformation
-
-```{r data_transformation}
-# Unify dates and calculate phenological variables
-Data <- Data %>%
-  mutate(
-    WA_arr_date = coalesce(WA50_B_arr_date, WA50_A_arr_date),
-    WA_dep_date = coalesce(WA50_B_dep_date, WA50_A_dep_date)
-  ) %>%
-  mutate(
-    BA_arr_jul = calculate_julian_vec(BA50_arr_date),
-    BA_dep_jul = calculate_julian_vec(BA50_dep_date),
-    WA_arr_jul = calculate_julian_vec(WA_arr_date),
-    WA_dep_jul = calculate_julian_vec(WA_dep_date)
-  ) %>%
-  mutate(
-    across(ends_with("_jul",
-           ~ ifelse(. < 0, . + 365, .))
-  )
-}
 
 ```
 
-## 3. Julian Date Calculations
+## 2. Julian Date Calculations
 
 ```{r julian_dates}
 # Find first full moon in April for reference
@@ -78,6 +56,28 @@ calculate_julian_from_moon <- function(fecha) {
 
 # Vectorized version
 calculate_julian_vec <- Vectorize(calculate_julian_from_moon)
+```
+
+## 3. Data Transformation
+
+```{r data_transformation}
+# Unify dates and calculate phenological variables
+Data <- Data %>%
+  mutate(
+    WA_arr_date = coalesce(WA_B_arr_date, WA_A_arr_date),
+    WA_dep_date = coalesce(WA_B_dep_date, WA_A_dep_date)
+  ) %>%
+  mutate(
+    BA_arr_jul = calculate_julian_vec(BA_arr_date),
+    BA_dep_jul = calculate_julian_vec(BA_dep_date),
+    WA_arr_jul = calculate_julian_vec(WA_arr_date),
+    WA_dep_jul = calculate_julian_vec(WA_dep_date)
+  ) %>%
+  mutate(
+    across(ends_with("_jul",
+           ~ ifelse(. < 0, . + 365, .))
+  )
+)
 
 ```
 
@@ -187,7 +187,7 @@ knitr::kable(r2_table, caption = "Model performance: marginal and conditional RÂ
 # Extract estimated marginal means
 emm_BA_arr <- as.data.frame(emmeans(best_model1, ~ Colony))
 emm_BA_dep <- as.data.frame(emmeans(best_model2, ~ Colony))
-emm_WA_arr <- as.data.frame(emmeans(best_model3, ~ Colony))
+emm_WA_arr <- as.data.frame(emmeans(best_model3, ~ Colony)) # In our case, Colony was not selected
 emm_WA_dep <- as.data.frame(emmeans(best_model4, ~ Colony))
 
 # Convert Julian dates to calendar dates
