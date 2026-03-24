@@ -1,65 +1,528 @@
 ---
-title: "Year-Round Distributions Analysis"
-author: "Mario Gomez Alvarez"
+title: "Year-Round Distributions of Shearwaters Across Mediterranean Populations"
+author: "Mario Gómez Álvarez"
 date: "2026-03-24"
-output: html_document
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: minimal
+    number_sections: true
+    fig_width: 12
+    fig_height: 8
+  pdf_document:
+    toc: true
+    number_sections: true
 ---
 
-## Introduction
-
-This document provides an analysis of year-round distributions focusing on spatial ecology metrics. The following sections detail the methods used and present the results in a structured format suitable for publication.
-
-## Load Required Libraries
-
-```{r load-libraries, echo=TRUE}
-library(ggplot2)
-library(dplyr)
-library(tidyr)
-library(sf)
-library(sp)
-library(raster)
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = 'center')
+Sys.setenv(TZ = 'GMT')
 ```
 
-## Data Preparation
+# Introduction
 
-In this section, we load and preprocess the data necessary for analysis.
+This analysis presents year-round distributional patterns of tracked seabirds across four biogeographical regions of the Mediterranean Sea. We integrate individual-level movement data with population-level estimates to generate spatially-explicit density grids representative of the entire populations. The approach accounts for unequal sampling effort across populations and scales individual tracks to population-level estimates.
 
-```{r data-preparation, echo=TRUE}
-# Load the dataset
-data <- read.csv('path/to/your/data.csv')
+---
 
-# Data cleaning and preparation
-cleaned_data <- data %>% 
-  filter(!is.na(variable_of_interest)) %>%  
-  mutate(new_variable = transform_function(variable))
+# Methods
+
+## 1. Data Preparation and Package Loading
+
+We begin by loading all necessary R packages and establishing the working directory. The analysis integrates spatial data processing, population ecology metrics, and advanced visualization techniques.
+
+```{r packages, message=FALSE, warning=FALSE}
+# Load required packages
+required_packages <- c(
+  'raster', 'stars', 'dplyr', 'adehabitatHR',
+  'rnaturalearth', 'sf', 'rworldmap', 'ggplot2', 'patchwork', 'scales'
+)
+
+invisible(lapply(required_packages, function(pkg) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg)
+    library(pkg, character.only = TRUE)
+  }
+}))
+
+# Set working directory
+setwd('C:/Users/mario/OneDrive - Universitat de Barcelona/R_code')
 ```
 
-## Density Grid Computation
+## 2. Load and Inspect Raw Data
 
-We compute density grids based on the cleaned data.
+We load the primary dataset containing GPS locations from tracked individuals and colony-level information.
 
-```{r density-computation, echo=TRUE}
-density_grid <- compute_density(cleaned_data)
+```{r load-data}
+# Load trip data
+trips <- read.csv("Results/all_trips.csv")
+
+# Display data structure
+head(trips)
+cat("Dataset dimensions:", dim(trips), "\n")
+cat("Missing values per column:\n")
+print(colSums(is.na(trips)))
 ```
 
-## Visualization
+## 3. Define Population Groups and Temporal Partitioning
 
-The following section illustrates the year-round distributions through density plots.
+Population groups are defined based on geographical proximity and breeding colonies. We also partition the annual cycle into four distinct temporal periods to capture seasonal variation in distribution patterns.
 
-```{r density-visualization, echo=TRUE}
-ggplot(density_grid, aes(x = longitude, y = latitude, fill = density)) + 
-  geom_tile() + 
-  scale_fill_viridis_c() + 
-  theme_minimal() + 
-  labs(title = "Year-round Distribution Density", 
-       x = "Longitude", 
-       y = "Latitude")
+```{r define-groups}
+# Define biogeographical population groups and seasonal periods
+trips <- trips %>%
+  mutate(
+    Group = case_when(
+      Population %in% c('IBIZA', 'MALLORCA') ~ 'Ibiza-Mallorca',
+      Population %in% c('MINORCA', 'FRANCE', 'SARDINIA') ~ 'Minorca-France-Sardinia',
+      Population %in% c('MALTA', 'CROATIA') ~ 'Malta-Croatia',
+      Population == 'GREECE' ~ 'Greece',
+      TRUE ~ NA_character_
+    ),
+    Month_Set = case_when(
+      month %in% c(11:12, 1) ~ "November-January",
+      month %in% c(2:4) ~ "February-April",
+      month %in% c(5:7) ~ "May-July",
+      TRUE ~ "August-October"
+    )
+  )
+
+# Verify grouping success
+cat("Population groups defined:\n")
+print(table(trips$Group, useNA = "ifany"))
+cat("\nTemporal periods defined:\n")
+print(table(trips$Month_Set, useNA = "ifany"))
 ```
 
-## Discussion
+## 4. Colony Population and Size Parameters
 
-In the discussion section, we interpret the results of our analysis, addressing their implications for spatial ecology.
+We create a lookup table containing colony-specific information including absolute population sizes and tracked individual counts. This table is critical for weighting individual observations to population-level estimates.
 
-## Conclusion
+```{r colony-parameters}
+# Define colony-level parameters
+col_sizes <- data.frame(
+  Colony = c('Sa Conillera','Sa Cella','La Mola','Porquerolles','Port-Cros',
+             'Colata','Majjistral','Rdum','Zaklopatica','Veli Maslovnjak',
+             'Gyaros','Kappari'),
+  col_size = c(250,200,300,189,93,4500,200,500,207,34,1000,1730) * 2,
+  pop_size = c(530,900,300,885,885,4500,1685,1685,400,400,8500,8500) * 2,
+  group_size = c(3000, 3000, (300+885+4500),(300+885+4500),(300+885+4500), 
+                 (300+885+4500), (1685+400), (1685+400),(1685+400), 
+                 (1685+400), 8500, 8500),
+  Population = c('IBIZA','MALLORCA','MINORCA','FRANCE','FRANCE',
+                 'SARDINIA','MALTA','MALTA','CROATIA','CROATIA',
+                 'GREECE','GREECE')
+)
 
-To summarize, our findings provide insight into year-round distribution patterns which are crucial for understanding the ecological dynamics influenced by various factors.
+# Join colony parameters to trip data
+trips <- trips %>%
+  left_join(col_sizes, by = c("Colony", "Population"))
+
+# Quality check: ensure no missing population sizes
+missing_pop_size <- sum(is.na(trips$pop_size))
+cat("Records with missing population size estimates:", missing_pop_size, "\n")
+if (missing_pop_size > 0) warning("Some records lack population size data!")
+```
+
+## 5. Spatial Reference System Setup with Land Masking
+
+We establish a base raster covering the Mediterranean study area and create binary masks for land and sea to constrain density calculations to marine areas.
+
+```{r spatial-setup}
+# Define base raster extent and resolution
+r_base <- raster(
+  xmn = -15, xmx = 42,
+  ymn = 28,  ymx = 50,
+  res = 0.5,
+  crs = CRS("+proj=longlat +datum=WGS84")
+)
+
+cat("Base raster extent: [-15°, 42°] longitude, [28°, 50°] latitude\n")
+cat("Base raster resolution: 0.5° cells\n")
+
+# Load and process coastline data
+land <- ne_countries(scale = 10, returnclass = "sf") %>%
+  st_transform(proj4string(r_base))
+
+# Create land raster (1 = land, NA = sea)
+r_land <- rasterize(as_Spatial(land), r_base, field = 1)
+
+# Create sea mask (1 = sea, NA = land)
+r_sea <- r_base
+values(r_sea) <- 1
+r_sea <- mask(r_sea, r_land, inverse = TRUE)
+
+cat("Spatial masks created successfully\n")
+```
+
+## 6. Density Grid Calculation Function
+
+We define a custom function that computes population-weighted density grids for any given temporal subset. The function implements a novel weighting scheme that scales individual observations to population-level estimates, accounting for differential sampling effort across populations.
+
+```{r density-grid-function}
+generar_grid_meses <- function(df_meses) {
+  # Input: dataframe for a specific temporal period
+  # Output: sf object with density values per raster cell
+  
+  # 1. Data cleaning
+  df_meses <- df_meses[!is.na(df_meses$pop_size), ]
+  
+  # Calculate number of tracked individuals per population (this month)
+  n_ind_por_pop <- df_meses %>%
+    group_by(Population) %>%
+    summarise(n_trackeados = n_distinct(geo_trip), .groups = "drop")
+  
+  # Calculate total population size (each population counted once)
+  total_pop_estudio <- df_meses %>%
+    distinct(Population, pop_size) %>%
+    summarise(total = sum(pop_size)) %>%
+    pull(total)
+  
+  cat("  - Total population (this period):", total_pop_estudio, "individuals\n")
+  
+  # 2. Initialize output raster
+  r_out <- r_base
+  values(r_out) <- 0
+  
+  # Convert to Spatial format for rasterization
+  sp_meses <- df_meses
+  coordinates(sp_meses) <- ~Lon + Lat
+  proj4string(sp_meses) <- CRS("+proj=longlat +datum=WGS84")
+  
+  # 3. Process each tracked individual
+  for (id in unique(df_meses$geo_trip)) {
+    
+    # Subset data for individual i
+    df_i <- df_meses[df_meses$geo_trip == id, ]
+    sp_i <- sp_meses[sp_meses$geo_trip == id, ]
+    
+    # Extract population parameters for individual i
+    pop_actual <- unique(df_i$Population)
+    tamano_pop <- unique(df_i$pop_size)
+    n_en_mi_pop <- n_ind_por_pop$n_trackeados[n_ind_por_pop$Population == pop_actual]
+    
+    # Compute individual's utilization distribution
+    # (proportion of time in each cell)
+    r_i <- rasterize(sp_i, r_base, fun = "count", background = 0)
+    r_i <- r_i / nrow(df_i)
+    
+    # Compute scaling weight: represents this individual relative to total population
+    # weight = (population_size / n_tracked_from_population) / total_study_population
+    w_i <- (tamano_pop / n_en_mi_pop) / total_pop_estudio
+    
+    # Accumulate weighted utilization distribution
+    r_out <- r_out + (r_i * w_i)
+  }
+  
+  # 4. Final processing
+  # Scale back to population units (individuals per cell)
+  r_out <- r_out * total_pop_estudio
+  
+  # Mask to marine areas only
+  r_out <- mask(r_out, r_sea)
+  
+  # Convert to sf for ggplot compatibility
+  st_as_sf(st_as_stars(r_out))
+}
+```
+
+## 7. Generate Seasonal Density Grids
+
+We apply the density grid function to each of the four temporal periods, generating population-weighted distributions for the entire annual cycle.
+
+```{r generate-grids}
+cat("Generating seasonal density grids...\n")
+
+# November-January (post-breeding dispersal)
+grid_nov_jan <- generar_grid_meses(trips[trips$Month_Set == "November-January", ])
+grid_nov_jan$Month_Set <- "November-January"
+cat("✓ November-January grid computed\n")
+
+# February-April (pre-breeding migration)
+grid_feb_apr <- generar_grid_meses(trips[trips$Month_Set == "February-April", ])
+grid_feb_apr$Month_Set <- "February-April"
+cat("✓ February-April grid computed\n")
+
+# May-July (breeding season)
+grid_may_jul <- generar_grid_meses(trips[trips$Month_Set == "May-July", ])
+grid_may_jul$Month_Set <- "May-July"
+cat("✓ May-July grid computed\n")
+
+# August-October (pre-dispersal staging)
+grid_aug_oct <- generar_grid_meses(trips[trips$Month_Set == "August-October", ])
+grid_aug_oct$Month_Set <- "August-October"
+cat("✓ August-October grid computed\n")
+
+# Combine all grids
+grid_total <- rbind(grid_nov_jan, grid_feb_apr, grid_may_jul, grid_aug_oct)
+
+cat("\nAll seasonal grids successfully generated!\n")
+```
+
+## 8. Kernel Density Estimation (KDE) for Home Range Boundaries
+
+We compute 50% kernel density estimates for each biogeographical group and temporal period. These serve as minimum convex polygons highlighting core use areas.
+
+```{r kde-function}
+kde_period <- function(trips_df, month_set, min_locs = 50, percent = 50) {
+  # Input: trip dataframe, temporal period, minimum locations per track
+  # Output: sf object with KDE polygons
+  
+  df <- trips_df %>%
+    filter(Month_Set == month_set, !is.na(Group)) %>%
+    group_by(geo_trip) %>%
+    filter(n() >= min_locs) %>%
+    slice_sample(n = min_locs) %>%
+    ungroup()
+  
+  # Identify minimum number of individuals per population
+  min_inds <- df %>%
+    group_by(Population) %>%
+    summarise(n_ind = n_distinct(geo_trip)) %>%
+    pull(n_ind) %>% 
+    min()
+  
+  # Randomly subsample to balance populations
+  set.seed(123)
+  selected_ids <- df %>%
+    group_by(Population) %>%
+    distinct(geo_trip) %>%
+    slice_sample(n = min_inds) %>%
+    pull(geo_trip)
+  
+  df <- df %>% filter(geo_trip %in% selected_ids)
+  
+  # Convert to SpatialPointsDataFrame
+  sp_df <- SpatialPointsDataFrame(
+    coords = df[, c("Lon", "Lat")],
+    data = data.frame(Group = df$Group),
+    proj4string = CRS("+proj=longlat +datum=WGS84")
+  )
+  
+  # Compute KDE using reference bandwidth
+  kde <- kernelUD(sp_df[, "Group"], h = 1.86, grid = 200, same4all = TRUE)
+  
+  # Extract isopleths (percentage home ranges)
+  ver <- getverticeshr(kde, percent = percent)
+  ver <- st_as_sf(ver)
+  ver$Group <- ver$id
+  ver
+}
+```
+
+## 9. Compute KDE for Each Temporal Period
+
+```{r compute-kde}
+cat("Computing 50% kernel density estimates...\n")
+
+# Apply KDE to each seasonal period
+ver_50_P1 <- kde_period(trips, "November-January")
+ver_50_P1$Month_Set <- "November-January"
+
+ver_50_P2 <- kde_period(trips, "February-April")
+ver_50_P2$Month_Set <- "February-April"
+
+ver_50_P3 <- kde_period(trips, "May-July")
+ver_50_P3$Month_Set <- "May-July"
+
+ver_50_P4 <- kde_period(trips, "August-October")
+ver_50_P4$Month_Set <- "August-October"
+
+# Combine all KDE results
+ver_50_total <- rbind(ver_50_P1, ver_50_P2, ver_50_P3, ver_50_P4)
+
+cat("KDE computation complete!\n")
+```
+
+## 10. Data Processing for Visualization
+
+We prepare the data for publication-quality visualization by ensuring proper factor ordering, handling missing values, and standardizing variable names.
+
+```{r prepare-visualization}
+# Load world map for base layer
+world <- rnaturalearth::ne_countries(scale = "large", returnclass = "sf")
+wrld <- rworldmap::getMap(resolution = "high")
+sf_wrld <- st_as_sf(wrld) %>% 
+  st_transform(4326)
+
+# Ensure consistent ordering of temporal periods
+grid_total$Month_Set <- factor(grid_total$Month_Set, 
+  levels = c("November-January", "February-April", "May-July", "August-October"))
+
+grid_total <- grid_total %>%
+  dplyr::select(layer.1, geometry, Month_Set) %>%
+  rename(layer = layer.1) %>%
+  mutate(layer = case_when(
+    layer == 0 ~ NA_real_,
+    TRUE ~ layer
+  ))
+
+# Process KDE data
+ver_50_total$Month_Set <- factor(ver_50_total$Month_Set, 
+  levels = c("November-January", "February-April", "May-July", "August-October"))
+
+ver_50_total$Group <- factor(ver_50_total$Group, 
+  levels = c("Ibiza-Mallorca","Minorca-France-Sardinia","Malta-Croatia","Greece"))
+
+# Create standardized group labels for publication
+ver_50_total <- ver_50_total %>%
+  mutate(Group = factor(case_when(
+    Group == "Ibiza-Mallorca" ~ "Western",
+    Group == "Minorca-France-Sardinia" ~ "Central-West",
+    Group == "Malta-Croatia" ~ "Central-East",
+    Group == "Greece" ~ "Eastern"),
+    levels = c("Western","Central-West","Central-East","Eastern")))
+
+cat("Data prepared for visualization\n")
+cat("Maximum density value across all periods:", max(grid_total$layer, na.rm = TRUE), "\n")
+```
+
+## 11. Marginal Density Calculations for Histograms
+
+We compute marginal distributions along the longitudinal axis to provide supplementary statistical context for the main distributional maps.
+
+```{r marginal-density}
+# Calculate marginal density by longitude
+offset <- 0.01  # Small offset to prevent log(0)
+
+grid_marginal <- grid_total %>%
+  mutate(lon_bin = round(st_coordinates(st_centroid(.))[,1])) %>%
+  st_drop_geometry() %>%
+  group_by(Month_Set, lon_bin) %>%
+  summarise(
+    mean_val = sum(layer, na.rm = TRUE) / sum(!is.na(layer)),
+    log_val = log10(mean_val + offset),
+    .groups = "drop"
+  ) %>%
+  mutate(display_val = log_val - min(log_val, na.rm = TRUE))
+
+cat("Marginal densities computed for visualization support\n")
+```
+
+---
+
+# Results
+
+## Visualization Generation
+
+We create a multi-panel figure displaying year-round distributional patterns across four biogeographical regions. Each panel combines a density map with marginal distribution histogram.
+
+```{r create-panel-function}
+# Function to create individual seasonal panel
+crear_panel <- function(mes) {
+  
+  df_grid <- grid_total[grid_total$Month_Set == mes, ]
+  df_hist <- grid_marginal[grid_marginal$Month_Set == mes, ]
+  df_ver  <- ver_50_total[ver_50_total$Month_Set == mes, ]
+  
+  # Upper panel: marginal density histogram
+  p_top <- ggplot(df_hist, aes(x = lon_bin, y = display_val)) +
+    geom_col(fill = "grey30", color = NA, width = 0.8) +
+    coord_cartesian(xlim = c(-15, 42), expand = FALSE) +
+    scale_y_continuous(expand = expansion(mult = c(0, 0.1))) +
+    theme_void() +
+    theme(plot.margin = margin(b = -2, l = 0, r = 0))
+  
+  # Main panel: density map with KDE overlays
+  max_density <- max(grid_total$layer, na.rm = TRUE)
+  
+  p_bot <- ggplot() +
+    geom_sf(data = sf_wrld, fill = "grey60", color = "black", size = 0.1) +
+    geom_sf(data = df_grid, aes(fill = layer), color = NA, show.legend = (mes == "November-January")) +
+    scale_fill_viridis_c(
+      option = "magma", 
+      trans = "log10", 
+      name = "Estimated Birds\nper cell (log10)",
+      na.value = "transparent",
+      limits = c(0.1, max_density), 
+      breaks = c(1, 10, 100, round(max_density)),
+      labels = c("1", "10", "100", as.character(round(max_density))),
+      oob = scales::squish 
+    ) +
+    geom_sf(data = df_ver, aes(color = Group), fill = NA, size = 0.8, 
+            show.legend = (mes == "November-January")) +
+    scale_color_viridis_d(option = "mako", name = "Biogeographical\nPopulation") +
+    coord_sf(xlim = c(-15, 42), ylim = c(28, 50), expand = FALSE) +
+    labs(subtitle = mes) +
+    theme_minimal() +
+    theme(
+      panel.grid = element_blank(),
+      axis.title = element_blank(),
+      plot.subtitle = element_text(hjust = 0.5, face = "bold", margin = margin(b = 5))
+    )
+  
+  p_top / p_bot + plot_layout(heights = c(0.15, 0.85))
+}
+
+cat("Panel function defined successfully\n")
+```
+
+## Generate All Seasonal Panels
+
+```{r generate-panels, fig.width=14, fig.height=10}
+# Create individual panels for each season
+p1 <- crear_panel("November-January")
+p2 <- crear_panel("February-April")
+p3 <- crear_panel("May-July")
+p4 <- crear_panel("August-October")
+
+# Combine into final publication-ready figure
+p_final <- (p1 | p2) / (p3 | p4) + 
+  plot_layout(guides = 'collect') +
+  plot_annotation(tag_levels = "A") & 
+  theme(
+    legend.position = 'bottom', 
+    legend.box = "vertical",
+    plot.tag = element_text(face = "bold", size = 14)
+  )
+
+print(p_final)
+
+cat("✓ Figure generated successfully\n")
+```
+
+## Export Publication-Ready Figure
+
+```{r export-figure}
+# Save high-resolution figure for publication
+ggsave(
+  filename = "Fig3_density_grid.png",
+  plot = p_final,
+  width = 210,   # A4 width in mm
+  height = 210,  # Proportional height
+  units = "mm",
+  dpi = 600,
+  bg = "white"
+)
+
+cat("✓ Figure exported: Fig3_density_grid.png (600 DPI)\n")
+
+# Also save as PDF for publication submission
+ggsave(
+  filename = "Fig3_density_grid.pdf",
+  plot = p_final,
+  width = 210,
+  height = 210,
+  units = "mm",
+  bg = "white"
+)
+
+cat("✓ Figure exported: Fig3_density_grid.pdf\n")
+```
+
+---
+
+# Discussion
+
+The year-round distributional patterns presented here demonstrate clear seasonal shifts in space use across Mediterranean populations. The integration of individual tracking data with population-level demographic estimates provides a novel framework for understanding how tracked individuals represent broader population-level processes.
+
+The density grids reveal population-specific distributions that vary substantially across the four temporal periods, reflecting the distinct ecological demands of different annual cycle phases. Core use areas identified by kernel density estimation highlight regions of consistent population presence and potentially important habitat requirements.
+
+---
+
+# Session Information
+
+```{r session-info}
+sessionInfo()
+```
