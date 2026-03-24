@@ -63,7 +63,7 @@ CRS_PROJ <- 4326
 
 ```{r data-load}
 # Load trip data
-trips <- read.csv("trips.csv")
+trips <- read.csv("all_trips.csv")
 
 # Define biogeographic groups
 trips_filtered <- trips %>%
