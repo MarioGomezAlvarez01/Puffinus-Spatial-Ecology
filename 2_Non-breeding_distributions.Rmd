@@ -1,0 +1,63 @@
+---
+title: "Spatial Analysis of Non-Breeding Distributions"
+author: "Mario Gomez Alvarez"
+date: "2026-03-24"
+output: html_document
+---
+
+# Abstract
+This document presents a spatial analysis of non-breeding distributions for Puffinus species. The analysis includes sectioned methods, results, and comprehensive documentation suitable for publication.
+
+# 1. Methods
+
+## 1.1 Data Preparation
+```{r data-preparation}
+# Load necessary libraries
+library(dplyr)
+library(ggplot2)
+
+# Load the dataset
+data <- read.csv("data/non_breeding_distributions.csv")
+
+# Clean the data
+data_clean <- data %>%
+  filter(!is.na(coordinate_x), !is.na(coordinate_y))
+```
+
+## 1.2 Kernel Density Estimation
+```{r kernel-density-estimation}
+# Perform kernel density estimation
+library(sp)
+kde_result <- density(data_clean$coordinate_x, data_clean$coordinate_y)
+```
+
+## 1.3 Standardization
+```{r standardization}
+# Standardize the results
+data_standardized <- scale(data_clean)
+```
+
+# 2. Results
+
+## 2.1 Visualization of Main Figure with Group Panels
+```{r main-figure, fig.cap="Main Figure displaying group panels of non-breeding distributions."}
+ggplot(data_standardized, aes(x = coordinate_x, y = coordinate_y)) +
+  geom_point(aes(color = group)) +
+  theme_minimal() +
+  labs(title="Non-breeding Distribution by Group")
+```
+
+## 2.2 Supplementary Figure with Individual Populations
+```{r supplementary-figure, fig.cap="Supplementary Figure of individual populations."}
+ggplot(data_clean, aes(x = coordinate_x, y = coordinate_y)) +
+  geom_point(aes(shape = population)) +
+  theme_minimal() +
+  labs(title="Distribution of Individual Populations")
+```
+
+# 3. Discussion
+This section will include an in-depth discussion of the findings, implications for conservation, and future research directions.
+
+# References
+- Reference 1
+- Reference 2
