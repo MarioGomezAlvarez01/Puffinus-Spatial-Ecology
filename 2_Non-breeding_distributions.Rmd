@@ -1,0 +1,45 @@
+---
+title: "Non-breeding distributions"
+author: "Your Name"
+date: "2026-03-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+library(sp)
+library(ks)
+```
+
+## Data Preparation
+
+```{r data-preparation}
+data <- read.csv("path/to/your/data.csv") %>%
+  filter(!is.na(variable_of_interest)) %>%
+  mutate(new_variable = ifelse(condition, true_value, false_value))
+```
+
+## Standardization Procedures
+
+```{r standardization}
+standardized_data <- scale(data$variable_of_interest)
+data$standardized_variable <- standardized_data
+```
+
+## KDE Calculations
+
+```{r kde}
+kde_result <- kde(data$coordinates)
+```
+
+## Figure Generation
+
+```{r figures}
+ggplot(data, aes(x = x_variable, y = y_variable)) +
+  geom_point() +
+  geom_density_2d() +
+  theme_minimal() +
+  labs(title="KDE of Non-breeding Distributions")
+```
