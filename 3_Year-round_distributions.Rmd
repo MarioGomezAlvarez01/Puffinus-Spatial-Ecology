@@ -1,0 +1,65 @@
+---
+title: "Year-Round Distributions Analysis"
+author: "Mario Gomez Alvarez"
+date: "2026-03-24"
+output: html_document
+---
+
+## Introduction
+
+This document provides an analysis of year-round distributions focusing on spatial ecology metrics. The following sections detail the methods used and present the results in a structured format suitable for publication.
+
+## Load Required Libraries
+
+```{r load-libraries, echo=TRUE}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(sf)
+library(sp)
+library(raster)
+```
+
+## Data Preparation
+
+In this section, we load and preprocess the data necessary for analysis.
+
+```{r data-preparation, echo=TRUE}
+# Load the dataset
+data <- read.csv('path/to/your/data.csv')
+
+# Data cleaning and preparation
+cleaned_data <- data %>% 
+  filter(!is.na(variable_of_interest)) %>%  
+  mutate(new_variable = transform_function(variable))
+```
+
+## Density Grid Computation
+
+We compute density grids based on the cleaned data.
+
+```{r density-computation, echo=TRUE}
+density_grid <- compute_density(cleaned_data)
+```
+
+## Visualization
+
+The following section illustrates the year-round distributions through density plots.
+
+```{r density-visualization, echo=TRUE}
+ggplot(density_grid, aes(x = longitude, y = latitude, fill = density)) + 
+  geom_tile() + 
+  scale_fill_viridis_c() + 
+  theme_minimal() + 
+  labs(title = "Year-round Distribution Density", 
+       x = "Longitude", 
+       y = "Latitude")
+```
+
+## Discussion
+
+In the discussion section, we interpret the results of our analysis, addressing their implications for spatial ecology.
+
+## Conclusion
+
+To summarize, our findings provide insight into year-round distribution patterns which are crucial for understanding the ecological dynamics influenced by various factors.
