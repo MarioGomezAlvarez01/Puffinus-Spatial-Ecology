@@ -1,0 +1,529 @@
+---
+title: "Migratory Connectivity of Mediterranean Shearwaters"
+author: "Mario Gómez Álvarez"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    code_folding: hide
+    fig_width: 12
+    fig_height: 8
+  pdf_document:
+    toc: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.align = 'center',
+  dpi = 300
+)
+Sys.setenv(TZ = 'GMT')
+```
+
+## Introduction
+
+Migratory connectivity describes the degree to which individuals from the same breeding population remain spatially associated during the non-breeding season. Here we quantify migratory connectivity for Mediterranean shearwaters (*Puffinus mauretanicus* and *P. yelkouan*) using GPS tracking data from eight breeding populations. We estimate the **MC statistic** (Cohen & Marra 2022) at three hierarchical levels: taxon, biogeographic group, and breeding population.
+
+The MC statistic ranges from −1 (complete mixing of breeding populations on non-breeding grounds) to +1 (complete segregation), with 0 indicating random mixing. Cost-distance matrices are computed over the ocean surface — shearwaters cannot fly over land — to ensure biologically realistic estimates of spatial relationships.
+
+---
+
+# 1. Load Libraries and Parameters
+
+```{r libraries}
+library(raster)
+library(sp)
+library(sf)
+library(gdistance)
+library(MigConnectivity)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(rnaturalearth)
+library(rworldmap)
+library(adehabitatHR)
+library(ggplot2)
+library(circlize)
+
+# Set working directory
+setwd('C:/Users/mario/OneDrive - Universitat de Barcelona/R_code')
+
+# Analysis parameters
+NON_BREEDING_MONTHS <- c(8, 9, 10, 11, 12, 1, 2, 3)  # August–March
+RASTER_RES  <- 0.1   # degrees; coarser resolution speeds up cost-distance computation
+N_BOOTSTRAP <- 1000  # bootstrap iterations for MC confidence intervals
+SEED        <- 123
+set.seed(SEED)
+```
+
+---
+
+# 2. Load and Prepare Data
+
+```{r load-data}
+# Load GPS tracking data
+trips <- read.csv("all_trips.csv")
+
+# Load colony coordinates and population metadata
+colonies <- read.csv("colonies_coords.csv")
+
+# Assign biogeographic groups to each GPS location
+trips <- trips %>%
+  mutate(
+    Group = case_when(
+      Population %in% c('IBIZA', 'MALLORCA')            ~ 'WesternMost',
+      Population %in% c('MINORCA', 'FRANCE', 'SARDINIA') ~ 'Central-West',
+      Population %in% c('MALTA', 'CROATIA')              ~ 'Central-East',
+      Population == 'GREECE'                             ~ 'EasternMost',
+      TRUE ~ NA_character_
+    ),
+    Taxon = case_when(
+      Sp == 'PUFMAU'  ~ 'Balearic',
+      Sp == 'PUFYEL'  ~ 'Yelkouan',
+      Sp == 'HYBRID'  ~ 'Hybrid',
+      TRUE ~ NA_character_
+    )
+  )
+
+# Filter to non-breeding months only
+trips_nb <- trips %>%
+  filter(month %in% NON_BREEDING_MONTHS, !is.na(Group))
+
+cat("GPS locations in non-breeding season:", nrow(trips_nb), "\n")
+cat("Individuals tracked:", n_distinct(trips_nb$geo_trip), "\n")
+```
+
+---
+
+# 3. Define Non-Breeding Zones
+
+Non-breeding zones are defined as rectangular geographic regions that cover the main wintering areas of Mediterranean shearwaters: the Atlantic seaboard (from the Bay of Biscay to the Gulf of Guinea) and the entire Mediterranean basin.
+
+```{r define-zones}
+# Define non-breeding zone bounding boxes as simple features (sf)
+zone_list <- list(
+  Bay_of_Biscay   = c(xmin = -10, xmax =  5, ymin = 43, ymax = 50),
+  NW_Africa       = c(xmin = -20, xmax =  0, ymin = 20, ymax = 43),
+  Gulf_of_Guinea  = c(xmin = -20, xmax =  8, ymin =  0, ymax = 20),
+  W_Mediterranean = c(xmin =  0,  xmax = 10, ymin = 36, ymax = 44),
+  C_Mediterranean = c(xmin = 10,  xmax = 20, ymin = 30, ymax = 44),
+  E_Mediterranean = c(xmin = 20,  xmax = 37, ymin = 30, ymax = 42)
+)
+
+# Convert each bounding box to an sf polygon
+zones_sf <- map2_dfr(
+  zone_list, names(zone_list),
+  function(bb, nm) {
+    st_as_sf(
+      data.frame(zone = nm),
+      geometry = st_sfc(
+        st_as_sfc(st_bbox(
+          c(xmin = bb["xmin"], ymin = bb["ymin"],
+            xmax = bb["xmax"], ymax = bb["ymax"]),
+          crs = 4326
+        ))
+      ),
+      crs = 4326
+    )
+  }
+)
+
+cat("Non-breeding zones defined:", nrow(zones_sf), "\n")
+print(zones_sf$zone)
+```
+
+---
+
+# 4. Assign GPS Points to Non-Breeding Zones
+
+```{r assign-zones}
+# Convert GPS locations to spatial features
+trips_sf <- st_as_sf(trips_nb, coords = c("Lon", "Lat"), crs = 4326)
+
+# Assign each point to a zone (spatial intersection)
+trips_sf <- st_join(trips_sf, zones_sf, join = st_within)
+
+# Count points per individual and zone
+zone_counts <- trips_sf %>%
+  st_drop_geometry() %>%
+  filter(!is.na(zone)) %>%
+  group_by(geo_trip, Population, Group, Taxon, zone) %>%
+  summarise(n_pts = n(), .groups = "drop")
+
+# Keep the dominant zone for each individual (zone with most GPS fixes)
+dominant_zone <- zone_counts %>%
+  group_by(geo_trip, Population, Group, Taxon) %>%
+  slice_max(n_pts, n = 1, with_ties = FALSE) %>%
+  ungroup()
+
+cat("Individuals with a dominant zone assigned:", nrow(dominant_zone), "\n")
+print(table(dominant_zone$zone))
+```
+
+---
+
+# 5. Define Breeding Sites
+
+Breeding sites are represented by the centroid of each individual's tracking data during the breeding season (months outside the non-breeding window). For individuals with insufficient breeding-season fixes, the colony coordinates are used as a fallback.
+
+```{r breeding-sites}
+# Identify breeding-season locations (months not in the non-breeding filter)
+trips_br <- trips %>%
+  filter(!month %in% NON_BREEDING_MONTHS) %>%
+  group_by(geo_trip, Population) %>%
+  summarise(
+    breed_lon = mean(Lon, na.rm = TRUE),
+    breed_lat = mean(Lat, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# For individuals without breeding-season fixes, use colony coordinates
+colony_lookup <- colonies %>%
+  rename(Population = Pop, breed_lon = Lon, breed_lat = Lat) %>%
+  select(Population, breed_lon, breed_lat)
+
+breeding_sites <- dominant_zone %>%
+  left_join(trips_br, by = c("geo_trip", "Population")) %>%
+  left_join(colony_lookup, by = "Population", suffix = c("", "_colony")) %>%
+  mutate(
+    breed_lon = coalesce(breed_lon, breed_lon_colony),
+    breed_lat = coalesce(breed_lat, breed_lat_colony)
+  ) %>%
+  select(geo_trip, Population, Group, Taxon, zone, breed_lon, breed_lat)
+
+cat("Breeding sites resolved for:", nrow(breeding_sites), "individuals\n")
+```
+
+---
+
+# 6. Build Ocean Cost-Distance Matrix
+
+Cost-distance matrices constrain movement paths to the ocean surface, preventing unrealistic overland routes. The raster is built at a moderate resolution to balance accuracy and computational speed.
+
+```{r cost-distance-setup}
+# Load a high-resolution land mask
+world <- rworldmap::getMap(resolution = "high")
+world_sf <- st_as_sf(world)
+
+# Create a raster template covering the study extent
+r_template <- raster(
+  xmn = -25, xmx = 42,
+  ymn = -5,  ymx = 55,
+  resolution = RASTER_RES,
+  crs = CRS("+proj=longlat +datum=WGS84")
+)
+values(r_template) <- 1  # All cells start as passable (ocean)
+
+# Detect land cells and set their conductance to zero (impassable)
+# rasterize() returns NA for water and 1 for land
+land_mask <- rasterize(world_sf, r_template, field = 1, background = NA)
+ocean_raster <- r_template
+ocean_raster[!is.na(land_mask)] <- 0  # Land cells are blocked
+
+cat("Raster dimensions:", dim(ocean_raster), "\n")
+cat("Ocean cells:", sum(values(ocean_raster) == 1, na.rm = TRUE), "\n")
+cat("Land cells blocked:", sum(values(ocean_raster) == 0, na.rm = TRUE), "\n")
+```
+
+```{r cost-distance-transition}
+# Optimization: pre-compute the transition matrix once and reuse it for all
+# pairwise distance calculations. This is the most time-consuming step, but
+# computing it only once avoids redundant processing.
+tr <- transition(ocean_raster, transitionFunction = mean, directions = 16)
+tr <- geoCorrection(tr, type = "c", multpl = FALSE)
+
+cat("Transition matrix computed successfully\n")
+```
+
+```{r cost-distance-matrix}
+# Extract unique site coordinates for breeding and non-breeding locations
+breed_coords <- breeding_sites %>%
+  distinct(Population, breed_lon, breed_lat) %>%
+  arrange(Population)
+
+# Wintering site coordinates: centroid of each zone polygon
+winter_coords <- zones_sf %>%
+  st_centroid() %>%
+  mutate(
+    winter_lon = st_coordinates(.)[, 1],
+    winter_lat = st_coordinates(.)[, 2]
+  ) %>%
+  st_drop_geometry() %>%
+  arrange(zone)
+
+# Convert to SpatialPoints for gdistance
+breed_sp  <- SpatialPoints(
+  breed_coords[, c("breed_lon", "breed_lat")],
+  proj4string = CRS("+proj=longlat +datum=WGS84")
+)
+
+winter_sp <- SpatialPoints(
+  winter_coords[, c("winter_lon", "winter_lat")],
+  proj4string = CRS("+proj=longlat +datum=WGS84")
+)
+
+# Compute pairwise cost-distance matrix among breeding sites (square; required by estMC as originDist)
+# Optimization: use costDistance() rather than looping over individual pairs
+breed_dist_matrix <- costDistance(tr, breed_sp, breed_sp)
+rownames(breed_dist_matrix) <- breed_coords$Population
+colnames(breed_dist_matrix) <- breed_coords$Population
+
+# Compute pairwise cost-distance matrix among non-breeding zones (square; required by estMC as targetDist)
+winter_dist_matrix <- costDistance(tr, winter_sp, winter_sp)
+rownames(winter_dist_matrix) <- winter_coords$zone
+colnames(winter_dist_matrix) <- winter_coords$zone
+
+cat("Breeding distance matrix dimensions:", dim(breed_dist_matrix), "\n")
+cat("Winter zone distance matrix dimensions:", dim(winter_dist_matrix), "\n")
+print(round(breed_dist_matrix / 1000, 0))  # Display distances in km
+```
+
+---
+
+# 7. Estimate Migratory Connectivity
+
+## 7a. Population-Level MC
+
+```{r mc-population}
+# Prepare the origin (breeding) and target (non-breeding) site indices
+# Each individual is mapped to their breeding population and dominant winter zone
+origin_index  <- match(breeding_sites$Population, breed_coords$Population)
+target_index  <- match(breeding_sites$zone,       winter_coords$zone)
+
+# Remove individuals with unresolved zone assignments
+valid_idx <- !is.na(origin_index) & !is.na(target_index)
+breeding_sites_valid <- breeding_sites[valid_idx, ]
+origin_index_valid   <- origin_index[valid_idx]
+target_index_valid   <- target_index[valid_idx]
+
+# Sample sizes per breeding population (used as relative weights)
+pop_sizes <- breeding_sites_valid %>%
+  count(Population) %>%
+  arrange(Population) %>%
+  pull(n)
+
+# Estimate MC at the population level with bootstrapped confidence intervals
+set.seed(SEED)
+mc_pop <- estMC(
+  originAssignment  = origin_index_valid,
+  targetAssignment  = target_index_valid,
+  originDist        = breed_dist_matrix,
+  targetDist        = winter_dist_matrix,
+  originRelAbund    = pop_sizes / sum(pop_sizes),
+  nBoot             = N_BOOTSTRAP,
+  alpha             = 0.05
+)
+
+cat("MC estimate (population level):", round(mc_pop$MC, 3),
+    "95% CI: [", round(mc_pop$lower, 3), ",", round(mc_pop$upper, 3), "]\n")
+```
+
+## 7b. Group-Level MC
+
+```{r mc-group}
+# Remap individuals to their biogeographic group
+group_order <- c("WesternMost", "Central-West", "Central-East", "EasternMost")
+
+group_coords <- breeding_sites_valid %>%
+  distinct(Group, breed_lon, breed_lat) %>%
+  group_by(Group) %>%
+  summarise(
+    breed_lon = mean(breed_lon),
+    breed_lat = mean(breed_lat),
+    .groups = "drop"
+  ) %>%
+  arrange(match(Group, group_order))
+
+group_sp <- SpatialPoints(
+  group_coords[, c("breed_lon", "breed_lat")],
+  proj4string = CRS("+proj=longlat +datum=WGS84")
+)
+
+# Recompute cost-distance matrix for groups (groups × winter zones, not used in estMC)
+# Also compute pairwise distances between groups (square; used as originDist in estMC)
+cost_dist_group_sq <- costDistance(tr, group_sp, group_sp)
+rownames(cost_dist_group_sq) <- group_coords$Group
+colnames(cost_dist_group_sq) <- group_coords$Group
+
+# Map each individual to their group index
+origin_grp <- match(breeding_sites_valid$Group, group_coords$Group)
+grp_sizes  <- breeding_sites_valid %>%
+  count(Group) %>%
+  arrange(match(Group, group_order)) %>%
+  pull(n)
+
+set.seed(SEED)
+mc_grp <- estMC(
+  originAssignment  = origin_grp,
+  targetAssignment  = target_index_valid,
+  originDist        = cost_dist_group_sq,
+  targetDist        = winter_dist_matrix,
+  originRelAbund    = grp_sizes / sum(grp_sizes),
+  nBoot             = N_BOOTSTRAP,
+  alpha             = 0.05
+)
+
+cat("MC estimate (group level):", round(mc_grp$MC, 3),
+    "95% CI: [", round(mc_grp$lower, 3), ",", round(mc_grp$upper, 3), "]\n")
+```
+
+## 7c. Taxon-Level MC
+
+```{r mc-taxon}
+# Retain only pure-species individuals (exclude hybrids)
+bs_taxon <- breeding_sites_valid %>%
+  filter(Taxon %in% c("Balearic", "Yelkouan"))
+
+taxon_coords <- bs_taxon %>%
+  distinct(Taxon, breed_lon, breed_lat) %>%
+  group_by(Taxon) %>%
+  summarise(
+    breed_lon = mean(breed_lon),
+    breed_lat = mean(breed_lat),
+    .groups = "drop"
+  ) %>%
+  arrange(Taxon)
+
+taxon_sp <- SpatialPoints(
+  taxon_coords[, c("breed_lon", "breed_lat")],
+  proj4string = CRS("+proj=longlat +datum=WGS84")
+)
+
+# Pairwise distances between taxa (square; used as originDist in estMC)
+cost_dist_taxon_sq <- costDistance(tr, taxon_sp, taxon_sp)
+rownames(cost_dist_taxon_sq) <- taxon_coords$Taxon
+colnames(cost_dist_taxon_sq) <- taxon_coords$Taxon
+
+origin_tax <- match(bs_taxon$Taxon,  taxon_coords$Taxon)
+target_tax <- match(bs_taxon$zone,   winter_coords$zone)
+tax_sizes  <- bs_taxon %>%
+  count(Taxon) %>%
+  arrange(Taxon) %>%
+  pull(n)
+
+set.seed(SEED)
+mc_tax <- estMC(
+  originAssignment  = origin_tax,
+  targetAssignment  = target_tax,
+  originDist        = cost_dist_taxon_sq,
+  targetDist        = winter_dist_matrix,
+  originRelAbund    = tax_sizes / sum(tax_sizes),
+  nBoot             = N_BOOTSTRAP,
+  alpha             = 0.05
+)
+
+cat("MC estimate (taxon level):", round(mc_tax$MC, 3),
+    "95% CI: [", round(mc_tax$lower, 3), ",", round(mc_tax$upper, 3), "]\n")
+```
+
+---
+
+# 8. Summarise MC Results
+
+```{r mc-summary}
+# Compile all MC estimates into a single table for reporting
+mc_summary <- data.frame(
+  Level    = c("Taxon", "Group", "Population"),
+  MC       = c(mc_tax$MC,  mc_grp$MC,  mc_pop$MC),
+  CI_lower = c(mc_tax$lower, mc_grp$lower, mc_pop$lower),
+  CI_upper = c(mc_tax$upper, mc_grp$upper, mc_pop$upper),
+  n_ind    = c(nrow(bs_taxon), nrow(breeding_sites_valid), nrow(breeding_sites_valid))
+)
+
+mc_summary$MC       <- round(mc_summary$MC, 3)
+mc_summary$CI_lower <- round(mc_summary$CI_lower, 3)
+mc_summary$CI_upper <- round(mc_summary$CI_upper, 3)
+
+print(mc_summary)
+```
+
+---
+
+# 9. Visualisation — Chord Diagram
+
+Chord diagrams illustrate the proportional connections between breeding populations (left arc) and non-breeding zones (right arc). Arc width on the breeding side is proportional to the number of tracked individuals; connections are coloured by the origin population.
+
+```{r chord-diagram-groups, fig.width=10, fig.height=10}
+# Prepare the connectivity matrix: rows = breeding groups, columns = winter zones
+conn_mat <- table(breeding_sites_valid$Group, breeding_sites_valid$zone)
+conn_mat <- conn_mat[group_order, , drop = FALSE]  # Enforce group order
+
+# Assign a distinct colour to each breeding group
+group_colors <- c(
+  "WesternMost"  = "#E63946",
+  "Central-West" = "#F4A261",
+  "Central-East" = "#2A9D8F",
+  "EasternMost"  = "#457B9D"
+)
+
+# Zone colours are lighter shades to distinguish them visually
+zone_colors <- setNames(
+  rep("#CCCCCC", ncol(conn_mat)),
+  colnames(conn_mat)
+)
+
+all_colors <- c(group_colors, zone_colors)
+
+# Draw the chord diagram
+par(mar = c(1, 1, 3, 1))
+chordDiagram(
+  conn_mat,
+  grid.col      = all_colors,
+  transparency  = 0.3,
+  annotationTrack = c("name", "grid"),
+  preAllocateTracks = list(track.height = 0.05)
+)
+title("Migratory Connectivity — Breeding Groups to Non-Breeding Zones",
+      cex.main = 1.2)
+circos.clear()
+```
+
+```{r chord-diagram-populations, fig.width=10, fig.height=10}
+# Repeat chord diagram at the breeding population level
+conn_pop <- table(breeding_sites_valid$Population, breeding_sites_valid$zone)
+
+pop_colors <- setNames(
+  scales::hue_pal()(nrow(conn_pop)),
+  rownames(conn_pop)
+)
+
+par(mar = c(1, 1, 3, 1))
+chordDiagram(
+  conn_pop,
+  grid.col      = c(pop_colors, zone_colors),
+  transparency  = 0.3,
+  annotationTrack = c("name", "grid"),
+  preAllocateTracks = list(track.height = 0.05)
+)
+title("Migratory Connectivity — Breeding Populations to Non-Breeding Zones",
+      cex.main = 1.2)
+circos.clear()
+```
+
+---
+
+# 10. Export Results
+
+```{r export}
+# Save the dominant-zone assignments for downstream analyses
+write.csv(
+  breeding_sites_valid,
+  "Results/migratory_connectivity_assignments.csv",
+  row.names = FALSE
+)
+
+# Save the MC summary table
+write.csv(
+  mc_summary,
+  "Results/MC_estimates_summary.csv",
+  row.names = FALSE
+)
+
+cat("Results written to Results/\n")
+```
