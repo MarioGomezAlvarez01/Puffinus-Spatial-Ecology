@@ -1,0 +1,1040 @@
+---
+title: "Migratory Connectivity of Mediterranean Shearwaters"
+author: "Mario Gómez Álvarez"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: minimal
+    number_sections: true
+    fig_width: 12
+    fig_height: 8
+  pdf_document:
+    toc: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE, fig.align = 'center')
+# Set timezone to GMT to ensure consistent temporal calculations across systems
+Sys.setenv(TZ = 'GMT')
+```
+
+# Introduction
+
+This analysis quantifies migratory connectivity in Mediterranean shearwaters — the degree to which breeding populations maintain spatial segregation during the non-breeding season. Strong migratory connectivity indicates that individuals from the same breeding population winter together, while weak connectivity suggests broad mixing of breeding populations on wintering grounds.
+
+We estimate migratory connectivity at three hierarchical levels:
+
+1. **Taxon level**: Balearic shearwater (*Puffinus mauretanicus*) versus Yelkouan shearwater (*Puffinus yelkouan*)
+2. **Group level**: Four biogeographic breeding groups (WesternMost, Central-West, Central-East, EasternMost)
+3. **Sub-population level**: Individual breeding colonies within each group
+
+The analysis uses GPS tracking data from known breeding colonies and estimates the `MC` statistic (Cohen & Marra 2022), which ranges from −1 (perfect mixing) to +1 (complete segregation). Cost-distance matrices computed over the ocean surface account for the fact that seabirds cannot fly over land, ensuring biologically realistic estimates of spatial relationships between sites.
+
+---
+
+# Methods
+
+## 1. Data Preparation and Package Loading
+
+All packages required for spatial analysis, connectivity estimation, and visualization are loaded here. Key dependencies include `gdistance` for cost-distance calculations over marine surfaces, `MigConnectivity` for the MC statistic, and `circlize` for chord diagram visualizations.
+
+```{r packages, message=FALSE, warning=FALSE}
+# Load all required packages for the analysis
+required_packages <- c(
+  # Spatial analysis and raster operations
+  'raster', 'sp', 'sf', 'rgeos',
+  # Cost-distance calculations over ocean surfaces
+  'gdistance',
+  # Migratory connectivity estimation
+  'MigConnectivity',
+  # Data manipulation
+  'dplyr', 'tidyr', 'purrr',
+  # Base map resources
+  'rnaturalearth', 'rworldmap',
+  # Kernel density estimation
+  'adehabitatHR',
+  # Visualization
+  'ggplot2', 'patchwork', 'scales', 'viridis',
+  # Chord diagrams
+  'circlize'
+)
+
+invisible(lapply(required_packages, function(pkg) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg)
+    library(pkg, character.only = TRUE)
+  }
+}))
+
+# Set working directory
+setwd('C:/Users/mario/OneDrive - Universitat de Barcelona/R_code')
+```
+
+## 2. Load and Inspect Tracking Data
+
+We load GPS tracking data and colony coordinates. The `Sp` column encodes species identity: `PUFMAU` denotes Balearic shearwater (*P. mauretanicus*) and `PUFYEL` denotes Yelkouan shearwater (*P. yelkouan*).
+
+```{r load-data}
+# Load GPS tracking dataset (all trips, all individuals, all seasons)
+trips <- read.csv("Results/all_trips.csv")
+
+# Load breeding colony coordinates and group assignments
+colonies <- read.csv("colonies_coords.csv")
+
+# Display data structure for reproducibility checks
+cat("Tracking dataset dimensions:", dim(trips), "\n")
+cat("Columns:", names(trips), "\n\n")
+cat("Colony dataset dimensions:", dim(colonies), "\n")
+cat("Colonies:\n")
+print(colonies[, c("Colony", "Pop", "Group")])
+```
+
+## 3. Define Biogeographic Groups and Species Assignments
+
+We assign each individual to a biogeographic group and species based on their colony of origin. The four groups follow the geographic structure of Mediterranean breeding populations:
+
+- **WesternMost**: Ibiza and Mallorca (Balearic shearwater, *P. mauretanicus*)
+- **Central-West**: Minorca, France, and Sardinia (Yelkouan shearwater, *P. yelkouan*)
+- **Central-East**: Malta and Croatia (Yelkouan shearwater, *P. yelkouan*)
+- **EasternMost**: Greece (Yelkouan shearwater, *P. yelkouan*)
+
+Only the WesternMost group belongs to *P. mauretanicus*; all other groups are *P. yelkouan*.
+
+```{r define-groups}
+# Assign biogeographic group and taxon to each tracking record
+trips <- trips %>%
+  mutate(
+    # Four biogeographic groups based on geographic proximity and genetic structure
+    Group = case_when(
+      Population %in% c('IBIZA', 'MALLORCA')             ~ 'WesternMost',
+      Population %in% c('MINORCA', 'FRANCE', 'SARDINIA') ~ 'Central-West',
+      Population %in% c('MALTA', 'CROATIA')              ~ 'Central-East',
+      Population == 'GREECE'                             ~ 'EasternMost',
+      TRUE ~ NA_character_
+    ),
+    # Species assignment based on breeding colony origin:
+    # P. mauretanicus breeds exclusively in the Balearic Islands (WesternMost group).
+    # P. yelkouan breeds throughout the central and eastern Mediterranean.
+    Taxon = case_when(
+      Population %in% c('IBIZA', 'MALLORCA') ~ 'P. mauretanicus',
+      TRUE                                   ~ 'P. yelkouan'
+    )
+  )
+
+# Verify group and taxon assignment
+cat("Records per biogeographic group:\n")
+print(table(trips$Group, useNA = "ifany"))
+cat("\nRecords per taxon:\n")
+print(table(trips$Taxon, useNA = "ifany"))
+```
+
+## 4. Define Annual Cycle Periods
+
+We partition the annual cycle into a core non-breeding period used for connectivity estimation and a complementary breeding period. The non-breeding season (August–September) is selected because it represents peak dispersal from the breeding colonies and captures the primary wintering destinations before pre-breeding migration begins.
+
+```{r define-periods}
+# Assign each record to a phenological period
+trips <- trips %>%
+  mutate(
+    Period = case_when(
+      month %in% c(8, 9)   ~ 'Non-breeding',    # Core dispersal / wintering period
+      month %in% c(3:7)    ~ 'Breeding',         # Colony attendance and chick-rearing
+      month %in% c(10, 11) ~ 'Post-breeding',    # Departure and autumn migration
+      month %in% c(12:2)   ~ 'Pre-breeding',     # Return migration to the Mediterranean
+      TRUE ~ NA_character_
+    )
+  )
+
+cat("Records per phenological period:\n")
+print(table(trips$Period, useNA = "ifany"))
+```
+
+---
+
+# Ocean Surface Raster and Cost-Distance Framework
+
+## 5. Create Ocean Conductance Raster
+
+To compute biologically realistic distances between sites, we create a conductance raster that assigns movement cost over the ocean (conductance = 1) and blocks movement over land (conductance = 0). This ensures that distance calculations follow marine routes, reflecting the actual flight paths available to seabirds.
+
+The spatial extent covers the study area (Atlantic Ocean and Mediterranean Sea, −20° to 42°E, 20° to 55°N) at 0.1° resolution, which balances computational efficiency with the spatial grain of shearwater movement.
+
+```{r ocean-raster}
+# Define raster extent covering the full movement area of Mediterranean shearwaters
+# The extent encompasses both breeding grounds (Mediterranean) and non-breeding areas
+# (Atlantic Ocean, including waters off West Africa)
+r_extent <- extent(-20, 42, 20, 55)
+
+# Create base raster at 0.1° resolution (~10 km at mid-latitudes)
+r_base <- raster(r_extent, res = 0.1, crs = CRS("+proj=longlat +datum=WGS84"))
+
+cat("Ocean raster extent:", as.character(r_extent), "\n")
+cat("Raster resolution: 0.1° (~10 km at 37°N)\n")
+cat("Raster dimensions:", dim(r_base), "\n")
+
+# Load high-resolution coastline data from Natural Earth
+land <- ne_countries(scale = 10, returnclass = "sf") %>%
+  st_transform(crs = "+proj=longlat +datum=WGS84")
+
+# Rasterize land polygons: land cells = 1, ocean cells = NA
+r_land <- rasterize(as_Spatial(land), r_base, field = 1)
+
+# Create ocean conductance raster:
+# Ocean cells = 1 (full conductance; movement permitted)
+# Land cells  = 0 (zero conductance; movement blocked)
+r_ocean <- r_base
+values(r_ocean) <- 1
+r_ocean[!is.na(r_land)] <- 0
+
+cat("Ocean raster created: ", sum(values(r_ocean) == 1, na.rm = TRUE),
+    "ocean cells,", sum(values(r_ocean) == 0, na.rm = TRUE), "land cells\n")
+```
+
+## 6. Compute Transition Matrix for Cost-Distance Calculations
+
+The transition matrix (from the `gdistance` package) encodes the conductance between adjacent raster cells. We use a 16-direction neighbourhood (including diagonal and knight-move transitions) to enable smooth, realistic movement paths through the ocean grid. The transition matrix is then geocorrected to account for distance distortion in the geographic coordinate system (degrees of longitude compress at higher latitudes).
+
+```{r transition-matrix}
+# Build the transition matrix from the ocean conductance raster.
+# transitionFunction = mean: conductance between two cells is the average of their values,
+# so movement is only possible if BOTH cells are ocean (mean > 0 only when both = 1).
+# directions = 16: allows 16-direction movement (8 cardinal/diagonal + 8 knight moves),
+# producing smoother paths than the standard 4- or 8-direction neighbourhood.
+tr_ocean <- transition(r_ocean, transitionFunction = mean, directions = 16)
+
+# Geocorrect the transition matrix to account for the fact that cell areas and
+# inter-cell distances vary with latitude in a geographic (longlat) projection.
+# geoCorrection converts conductance values into proper distance-based costs.
+tr_ocean_gc <- geoCorrection(tr_ocean, type = "c", multpl = FALSE)
+
+cat("Transition matrix computed and geocorrected\n")
+cat("Matrix dimensions:", dim(tr_ocean_gc), "\n")
+```
+
+---
+
+# Site Definition: Breeding Origins and Non-Breeding Destinations
+
+## 7. Define Breeding Origin Sites
+
+Breeding origin sites are defined by buffering colony coordinates to create discrete spatial units. Each colony is assigned a circular buffer representing its local foraging area and colony influence zone. For group-level analyses, individual colony buffers within the same group are merged (unioned) into a single polygon representing the group's breeding range.
+
+**Buffer size rationale**: A 50 km radius buffer is used for individual colony sites. This scale captures the immediate nesting habitat and reflects the spatial precision of GPS-derived breeding locations while avoiding excessive overlap between neighbouring colonies.
+
+```{r breeding-sites}
+# Convert colony coordinates to sf point objects
+# CRS: WGS84 geographic coordinates (EPSG:4326)
+colonies_sf <- st_as_sf(
+  colonies,
+  coords = c("Lon", "Lat"),
+  crs = 4326
+)
+
+# Re-project to an equidistant azimuthal projection centred on the Mediterranean
+# for accurate buffer distance calculations in metres.
+# AEQD (Azimuthal Equidistant) preserves distances from the projection centre,
+# making it appropriate for buffering across the Mediterranean study area.
+crs_aeqd <- CRS("+proj=aeqd +lat_0=37 +lon_0=15 +datum=WGS84 +units=m")
+colonies_aeqd <- st_transform(colonies_sf, crs = crs_aeqd)
+
+# Buffer each colony by 50 km (50,000 m) to define its spatial footprint
+# The 50 km radius was chosen to: (1) represent local colony influence,
+# (2) avoid substantial overlap between geographically distinct colonies,
+# (3) remain within the spatial grain of tracking data resolution.
+BUFFER_RADIUS_M <- 50000  # 50 km in metres
+
+colony_buffers <- st_buffer(colonies_aeqd, dist = BUFFER_RADIUS_M)
+
+# Re-project buffered polygons back to geographic coordinates for subsequent analyses
+colony_buffers_geo <- st_transform(colony_buffers, crs = 4326)
+
+# Add group membership to each colony buffer for group-level aggregation
+colony_buffers_geo <- colony_buffers_geo %>%
+  mutate(
+    Group = case_when(
+      Pop %in% c('Ibiza', 'Mallorca')            ~ 'WesternMost',
+      Pop %in% c('Minorca', 'France', 'Sardinia') ~ 'Central-West',
+      Pop %in% c('Malta', 'Croatia')              ~ 'Central-East',
+      Pop %in% c('Greece')                        ~ 'EasternMost',
+      TRUE ~ NA_character_
+    ),
+    Taxon = case_when(
+      Pop %in% c('Ibiza', 'Mallorca') ~ 'P. mauretanicus',
+      TRUE                            ~ 'P. yelkouan'
+    )
+  )
+
+# --- Group-level breeding sites ---
+# Merge (union) individual colony buffers within each group into a single polygon.
+# This creates a single spatial unit per biogeographic group, used for group-level
+# and taxon-level connectivity analyses.
+group_sites <- colony_buffers_geo %>%
+  group_by(Group) %>%
+  summarise(geometry = st_union(geometry), .groups = "drop")
+
+# Taxon-level sites: union all Balearic vs. all Yelkouan breeding polygons
+taxon_sites <- colony_buffers_geo %>%
+  group_by(Taxon) %>%
+  summarise(geometry = st_union(geometry), .groups = "drop")
+
+cat("Individual colony sites defined:", nrow(colony_buffers_geo), "\n")
+cat("Group-level sites defined:", nrow(group_sites), "\n")
+cat("Taxon-level sites defined:", nrow(taxon_sites), "\n")
+```
+
+## 8. Define Non-Breeding Destination Areas
+
+Non-breeding areas are defined using kernel density estimation applied to GPS locations from the core non-breeding period (August–September). We derive discrete non-breeding regions by intersecting 50% utilization distribution (UD) polygons with predefined geographic sectors, ensuring that the resulting destination areas are ecologically meaningful and spatially non-overlapping.
+
+The 50% UD contour was selected to represent core use areas and avoid including peripheral, low-use cells that might be artefacts of individual variation rather than true population-level habitat use.
+
+```{r nonbreeding-sites}
+# Filter tracking data to the core non-breeding season (August–September)
+# This period captures post-breeding dispersal and the primary wintering phase.
+trips_nb <- trips %>%
+  filter(Period == 'Non-breeding', !is.na(Group)) %>%
+  # Apply minimum location filter: retain only individuals with ≥ 30 fixes
+  # to ensure reliable home range estimation
+  group_by(geo_trip) %>%
+  filter(n() >= 30) %>%
+  ungroup()
+
+cat("Non-breeding records (Aug–Sep, ≥30 fixes/individual):", nrow(trips_nb), "\n")
+cat("Individuals represented:", n_distinct(trips_nb$geo_trip), "\n")
+
+# --- KDE-based non-breeding area delineation ---
+# Convert to SpatialPointsDataFrame for use with adehabitatHR
+sp_nb <- SpatialPointsDataFrame(
+  coords = trips_nb[, c("Lon", "Lat")],
+  data   = data.frame(Group = trips_nb$Group),
+  proj4string = CRS("+proj=longlat +datum=WGS84")
+)
+
+# Compute kernel utilization distributions (KUD) per group
+# h = 1.86: reference bandwidth (Silverman's rule of thumb for this dataset)
+# grid = 200: output grid resolution for UD estimation
+# same4all = TRUE: use a common spatial grid across groups for comparability
+kde_nb <- kernelUD(sp_nb[, "Group"], h = 1.86, grid = 200, same4all = TRUE)
+
+# Extract 50% isopleth contours as non-breeding destination polygons.
+# The 50% UD represents core wintering areas used by the majority of tracked individuals
+# and corresponds to the region where each group concentrates most of its non-breeding time.
+nb_sites_kde <- st_as_sf(getverticeshr(kde_nb, percent = 50)) %>%
+  rename(Group = id) %>%
+  st_make_valid()  # Repair any topological errors in polygon boundaries
+
+cat("Non-breeding KDE sites derived for groups:", unique(nb_sites_kde$Group), "\n")
+```
+
+---
+
+# Cost-Distance Matrices
+
+## 9. Compute Colony and Site Centroids
+
+Connectivity estimates require point coordinates representing the centre of each breeding origin and non-breeding destination. We use polygon centroids, which provide a consistent and reproducible spatial summary of each site's location.
+
+```{r site-centroids}
+# Extract centroids for individual breeding colony sites
+# These are used as origin points in the sub-population level analysis
+colony_centroids <- st_centroid(colony_buffers_geo)
+colony_coords <- st_coordinates(colony_centroids)
+
+# Centroids for group-level breeding sites
+group_breed_centroids <- st_centroid(group_sites)
+group_breed_coords    <- st_coordinates(group_breed_centroids)
+
+# Centroids for group-level non-breeding sites
+group_nb_centroids <- st_centroid(nb_sites_kde)
+group_nb_coords    <- st_coordinates(group_nb_centroids)
+
+# Centroids for taxon-level breeding sites
+taxon_centroids <- st_centroid(taxon_sites)
+taxon_coords    <- st_coordinates(taxon_centroids)
+
+cat("Colony centroids:", nrow(colony_coords), "\n")
+cat("Group breeding centroids:", nrow(group_breed_coords), "\n")
+cat("Group non-breeding centroids:", nrow(group_nb_coords), "\n")
+cat("Taxon centroids:", nrow(taxon_coords), "\n")
+```
+
+## 10. Compute Cost-Distance Matrices
+
+We use the `costDistance()` function from `gdistance` to calculate least-cost distances between all pairs of sites, routing exclusively through ocean cells. This approach accounts for geographic barriers (land masses, the Strait of Gibraltar) that constrain shearwater movement.
+
+**Projection note**: Cost-distance calculations are performed on the geographic (longlat) raster with geocorrection applied (see Section 6). The resulting distances are in metres and represent the shortest over-ocean path between site pairs.
+
+```{r cost-distance}
+# Helper function: compute square cost-distance matrix between two sets of points
+# Arguments:
+#   coords_from : matrix of [x, y] origin coordinates (longlat)
+#   coords_to   : matrix of [x, y] destination coordinates (longlat)
+#   tr          : geocorrected transition matrix (from gdistance)
+# Returns: numeric matrix of least-cost distances in metres
+compute_cost_dist <- function(coords_from, coords_to, tr) {
+  # costDistance() computes the accumulated least-cost distance across the
+  # transition matrix from every origin to every destination point.
+  # The transition matrix ensures that paths are routed exclusively through
+  # ocean cells (land cells have zero conductance and are impassable).
+  costDistance(tr, as.matrix(coords_from), as.matrix(coords_to))
+}
+
+# --- Group-level distance matrices ---
+
+# Distance matrix among group-level breeding sites (origin–origin distances)
+# Used by MigConnectivity to quantify how spatially separated breeding populations are.
+# Greater separation implies greater potential for population-level differences in
+# non-breeding distribution.
+dist_breed_group <- compute_cost_dist(
+  group_breed_coords, group_breed_coords, tr_ocean_gc
+)
+rownames(dist_breed_group) <- colnames(dist_breed_group) <- group_sites$Group
+cat("Group breeding site distance matrix:\n")
+print(round(dist_breed_group / 1000, 0))  # Convert to km for readability
+cat("(distances in km)\n\n")
+
+# Distance matrix among group-level non-breeding sites (destination–destination distances)
+# Quantifies spatial separation of non-breeding areas; used in the MC statistic denominator.
+dist_nb_group <- compute_cost_dist(
+  group_nb_coords, group_nb_coords, tr_ocean_gc
+)
+rownames(dist_nb_group) <- colnames(dist_nb_group) <- nb_sites_kde$Group
+cat("Group non-breeding site distance matrix:\n")
+print(round(dist_nb_group / 1000, 0))
+cat("(distances in km)\n\n")
+
+# --- Taxon-level distance matrices ---
+
+# Breeding distances between the two taxa
+dist_breed_taxon <- compute_cost_dist(
+  taxon_coords, taxon_coords, tr_ocean_gc
+)
+rownames(dist_breed_taxon) <- colnames(dist_breed_taxon) <- taxon_sites$Taxon
+
+# --- Colony-level (sub-population) distance matrices ---
+
+# Distance matrix among individual colony sites
+dist_breed_colony <- compute_cost_dist(
+  colony_coords, colony_coords, tr_ocean_gc
+)
+rownames(dist_breed_colony) <- colnames(dist_breed_colony) <- colony_centroids$Colony
+
+cat("All cost-distance matrices computed successfully\n")
+```
+
+---
+
+# Migratory Connectivity Estimation
+
+## 11. Construct Movement Matrices
+
+The movement matrix records the number of tracked individuals from each breeding origin (row) that were observed in each non-breeding destination (column). We classify each individual's non-breeding location by determining which non-breeding site polygon their GPS fixes fall within during August–September.
+
+```{r movement-matrix}
+# Helper function: assign non-breeding area to each tracked individual
+# based on which KDE polygon contains the majority of their non-breeding fixes.
+# Arguments:
+#   individual_nb_df : dataframe of non-breeding GPS fixes for one individual
+#   nb_polygons      : sf object of non-breeding destination polygons
+# Returns: character string with the assigned destination name (or NA)
+assign_nb_area <- function(individual_nb_df, nb_polygons) {
+  # Convert individual locations to sf points
+  pts <- st_as_sf(individual_nb_df, coords = c("Lon", "Lat"), crs = 4326)
+
+  # Perform spatial intersection: find which non-breeding polygon each fix falls in
+  intersected <- st_join(pts, nb_polygons, join = st_within)
+
+  # Assign the individual to the non-breeding area containing the most of their fixes
+  # (plurality rule, robust to individuals near polygon boundaries)
+  if (all(is.na(intersected$Group.y))) return(NA_character_)
+
+  names(sort(table(intersected$Group.y), decreasing = TRUE))[1]
+}
+
+# --- Build group-level movement matrix ---
+# Each row = one breeding group (origin); each column = one non-breeding area (destination)
+
+# Get one record per individual for the non-breeding period
+ind_nb <- trips_nb %>%
+  distinct(geo_trip, .keep_all = TRUE) %>%
+  select(geo_trip, Group, Population)
+
+# Assign each individual to a non-breeding destination area
+set.seed(123)  # Seed for reproducibility of random tie-breaking
+individual_assignments <- trips_nb %>%
+  group_split(geo_trip) %>%
+  map_dfr(function(df) {
+    dest <- assign_nb_area(df, nb_sites_kde)
+    data.frame(
+      geo_trip   = unique(df$geo_trip),
+      origin_grp = unique(df$Group),
+      dest_grp   = dest
+    )
+  })
+
+# Construct the origin × destination count matrix
+# Rows = breeding groups; columns = non-breeding areas
+move_matrix_group <- individual_assignments %>%
+  filter(!is.na(dest_grp)) %>%
+  count(origin_grp, dest_grp) %>%
+  tidyr::pivot_wider(
+    names_from  = dest_grp,
+    values_from = n,
+    values_fill = 0
+  ) %>%
+  tibble::column_to_rownames("origin_grp") %>%
+  as.matrix()
+
+cat("Group-level movement matrix (counts):\n")
+print(move_matrix_group)
+cat("\nRow sums (individuals per breeding group):", rowSums(move_matrix_group), "\n")
+```
+
+## 12. Estimate Migratory Connectivity — Group Level
+
+The `estMC()` function from the `MigConnectivity` package estimates the MC statistic and its confidence interval via a bootstrap resampling procedure. MC is a scaled correlation between the pairwise distances separating individuals on the breeding grounds and on the non-breeding grounds:
+
+- **MC = +1**: Perfect connectivity — individuals from the same breeding group always winter together
+- **MC = 0**: No connectivity — breeding group membership does not predict non-breeding location
+- **MC = −1**: Perfect mirroring — birds from the same breeding group are maximally separated in winter
+
+The `originDist` and `targetDist` arguments supply the cost-distance matrices for breeding and non-breeding sites, respectively. The `originRelAbund` argument weights each breeding group by its relative population size, preventing groups with more tracked individuals from disproportionately influencing the estimate.
+
+```{r mc-group}
+# Define relative abundance (proportion of total tracked individuals) per group
+# Population weighting ensures the MC estimate reflects demographic contributions,
+# not just sampling effort.
+n_per_group <- ind_nb %>%
+  count(Group) %>%
+  mutate(rel_abund = n / sum(n))
+
+# Align group order between matrices and abundance vector
+grp_order <- rownames(move_matrix_group)
+rel_abund_group <- n_per_group$rel_abund[match(grp_order, n_per_group$Group)]
+
+# Ensure both distance matrices use the same row/column ordering
+dist_breed_group_ord <- dist_breed_group[grp_order, grp_order]
+nb_groups_ord        <- colnames(move_matrix_group)
+dist_nb_group_ord    <- dist_nb_group[nb_groups_ord, nb_groups_ord]
+
+# Estimate MC statistic with 95% bootstrap confidence intervals
+# nBoot = 1000: number of bootstrap resamples for CI estimation
+# alpha = 0.05: significance level (95% CI)
+set.seed(123)
+mc_group <- estMC(
+  originDist       = dist_breed_group_ord,    # Breeding site distance matrix
+  targetDist       = dist_nb_group_ord,        # Non-breeding site distance matrix
+  originRelAbund   = rel_abund_group,          # Relative population sizes per group
+  transitionMatrix = move_matrix_group,        # Observed origin × destination movements
+  nBoot            = 1000,                     # Bootstrap iterations for CI estimation
+  alpha            = 0.05                      # Confidence level (α = 0.05 → 95% CI)
+)
+
+cat("=== Group-Level Migratory Connectivity ===\n")
+cat("MC estimate:", round(mc_group$MC, 3), "\n")
+cat("95% CI: [", round(mc_group$lowerCI, 3), ",", round(mc_group$upperCI, 3), "]\n")
+cat("SE:", round(mc_group$SE, 3), "\n")
+```
+
+## 13. Estimate Migratory Connectivity — Taxon Level
+
+At the taxon level, we assess whether Balearic and Yelkouan shearwaters differ in their non-breeding distribution, regardless of which specific group they belong to. The movement matrix here summarizes the number of tracked individuals of each species recorded in each non-breeding area.
+
+```{r mc-taxon}
+# Assign taxon to each non-breeding individual
+individual_assignments <- individual_assignments %>%
+  left_join(trips_nb %>% distinct(geo_trip, Taxon), by = "geo_trip")
+
+# Taxon-level origin × destination movement matrix
+move_matrix_taxon <- individual_assignments %>%
+  filter(!is.na(dest_grp), !is.na(Taxon)) %>%
+  count(Taxon, dest_grp) %>%
+  tidyr::pivot_wider(
+    names_from  = dest_grp,
+    values_from = n,
+    values_fill = 0
+  ) %>%
+  tibble::column_to_rownames("Taxon") %>%
+  as.matrix()
+
+cat("Taxon-level movement matrix:\n")
+print(move_matrix_taxon)
+
+# Relative abundance by taxon (proportion of total tracked individuals)
+n_per_taxon <- individual_assignments %>%
+  filter(!is.na(Taxon)) %>%
+  count(Taxon) %>%
+  mutate(rel_abund = n / sum(n))
+
+taxon_order        <- rownames(move_matrix_taxon)
+rel_abund_taxon    <- n_per_taxon$rel_abund[match(taxon_order, n_per_taxon$Taxon)]
+dist_breed_tax_ord <- dist_breed_taxon[taxon_order, taxon_order]
+nb_tax_ord         <- colnames(move_matrix_taxon)
+dist_nb_tax_ord    <- dist_nb_group[nb_tax_ord, nb_tax_ord]
+
+# Estimate taxon-level MC statistic
+set.seed(123)
+mc_taxon <- estMC(
+  originDist       = dist_breed_tax_ord,
+  targetDist       = dist_nb_tax_ord,
+  originRelAbund   = rel_abund_taxon,
+  transitionMatrix = move_matrix_taxon,
+  nBoot            = 1000,
+  alpha            = 0.05
+)
+
+cat("=== Taxon-Level Migratory Connectivity ===\n")
+cat("MC estimate:", round(mc_taxon$MC, 3), "\n")
+cat("95% CI: [", round(mc_taxon$lowerCI, 3), ",", round(mc_taxon$upperCI, 3), "]\n")
+cat("SE:", round(mc_taxon$SE, 3), "\n")
+```
+
+## 14. Estimate Migratory Connectivity — Sub-Population Level
+
+At the finest scale, we assess connectivity among individual breeding colonies. This provides insight into whether within-group structure is maintained on the non-breeding grounds, or whether mixing occurs even among populations that breed in close proximity. Colony-level analyses require sufficient tracking coverage from each colony; colonies with fewer than three tracked individuals are excluded to ensure reliable estimates.
+
+```{r mc-subpop}
+# Assign non-breeding areas to individuals at colony level
+individual_assignments_col <- trips_nb %>%
+  group_split(geo_trip) %>%
+  map_dfr(function(df) {
+    dest <- assign_nb_area(df, nb_sites_kde)
+    data.frame(
+      geo_trip = unique(df$geo_trip),
+      Colony   = unique(df$Colony),
+      dest_grp = dest
+    )
+  })
+
+# Identify colonies with sufficient tracking coverage (≥ 3 individuals)
+# to produce stable non-breeding area assignment
+well_sampled_colonies <- individual_assignments_col %>%
+  filter(!is.na(dest_grp)) %>%
+  count(Colony) %>%
+  filter(n >= 3) %>%
+  pull(Colony)
+
+cat("Colonies with ≥ 3 tracked individuals in non-breeding period:",
+    length(well_sampled_colonies), "\n")
+cat("Excluded (< 3 individuals):",
+    setdiff(unique(individual_assignments_col$Colony), well_sampled_colonies), "\n")
+
+# Build colony-level movement matrix (rows = colonies, columns = non-breeding areas)
+move_matrix_colony <- individual_assignments_col %>%
+  filter(!is.na(dest_grp), Colony %in% well_sampled_colonies) %>%
+  count(Colony, dest_grp) %>%
+  tidyr::pivot_wider(
+    names_from  = dest_grp,
+    values_from = n,
+    values_fill = 0
+  ) %>%
+  tibble::column_to_rownames("Colony") %>%
+  as.matrix()
+
+cat("Colony-level movement matrix:\n")
+print(move_matrix_colony)
+
+# Relative abundance per colony based on official population size estimates
+# (from script 3_Year-round_distributions.Rmd colony parameters)
+col_pop_sizes <- data.frame(
+  Colony   = c('Sa Conillera', 'Sa Cella', 'La Mola', 'Porquerolles', 'Port-Cros',
+               'Colata', 'Majjistral', 'Rdum', 'Zaklopatica', 'Veli Maslovnjak',
+               'Gyaros', 'Kappari'),
+  pop_size = c(500, 400, 300, 189, 93, 4500, 400, 1000, 207, 34, 1000, 1730)
+)
+
+col_order_mc  <- rownames(move_matrix_colony)
+col_pop_order <- col_pop_sizes$pop_size[match(col_order_mc, col_pop_sizes$Colony)]
+# Normalize to relative proportions summing to 1
+rel_abund_col <- col_pop_order / sum(col_pop_order, na.rm = TRUE)
+
+# Reorder distance matrices to match movement matrix row/column ordering
+dist_col_ord <- dist_breed_colony[col_order_mc, col_order_mc]
+nb_col_ord   <- colnames(move_matrix_colony)
+dist_nb_col  <- dist_nb_group[nb_col_ord, nb_col_ord]
+
+# Estimate colony-level MC statistic
+set.seed(123)
+mc_colony <- estMC(
+  originDist       = dist_col_ord,
+  targetDist       = dist_nb_col,
+  originRelAbund   = rel_abund_col,
+  transitionMatrix = move_matrix_colony,
+  nBoot            = 1000,
+  alpha            = 0.05
+)
+
+cat("=== Sub-Population (Colony) Level Migratory Connectivity ===\n")
+cat("MC estimate:", round(mc_colony$MC, 3), "\n")
+cat("95% CI: [", round(mc_colony$lowerCI, 3), ",", round(mc_colony$upperCI, 3), "]\n")
+cat("SE:", round(mc_colony$SE, 3), "\n")
+```
+
+## 15. Summarise Connectivity Estimates Across Levels
+
+```{r mc-summary}
+# Compile all MC estimates into a single summary table for reporting
+mc_summary <- data.frame(
+  Level       = c('Taxon', 'Group', 'Sub-population (colony)'),
+  MC          = c(mc_taxon$MC,  mc_group$MC,  mc_colony$MC),
+  Lower_95CI  = c(mc_taxon$lowerCI, mc_group$lowerCI, mc_colony$lowerCI),
+  Upper_95CI  = c(mc_taxon$upperCI, mc_group$upperCI, mc_colony$upperCI),
+  SE          = c(mc_taxon$SE, mc_group$SE, mc_colony$SE)
+) %>%
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+
+cat("=== Migratory Connectivity Summary ===\n")
+print(mc_summary, row.names = FALSE)
+
+# Interpretation guide for MC values:
+# MC > 0.5  → strong connectivity: populations largely maintain segregation in winter
+# MC ≈ 0    → no connectivity: non-breeding distribution is independent of breeding origin
+# MC < 0    → negative connectivity: unusual; breeding proximity predicts winter separation
+```
+
+---
+
+# Visualization
+
+## 16. Chord Diagrams of Migratory Connectivity
+
+Chord diagrams provide an intuitive visual summary of migratory connectivity by displaying the flow of individuals between breeding origins (left semicircle) and non-breeding destinations (right semicircle). Each chord represents the proportion of tracked individuals from one origin population that use a given non-breeding area:
+
+- **Chord width at the origin sector** is proportional to the fraction of individuals from that population that travel to each destination
+- **Chord width at the destination sector** reflects the relative contribution of each breeding population to that non-breeding area
+- **Sector arc width** is proportional to the relative abundance of each population (population-weighted)
+
+The colour scheme follows the biogeographic group conventions used throughout this paper series: WesternMost (blue), Central-West (teal), Central-East (gold), EasternMost (red).
+
+### 16.1 Group-Level Chord Diagram
+
+```{r chord-group, fig.width=8, fig.height=8}
+# Define colours for the four biogeographic groups and their corresponding
+# non-breeding destination areas. Consistent colour palette across all figures.
+group_colours <- c(
+  'WesternMost'  = '#2166AC',  # Blue    – westernmost Balearic populations
+  'Central-West' = '#4DAC26',  # Green   – central-western populations (Minorca, France, Sardinia)
+  'Central-East' = '#D6604D',  # Orange  – central-eastern populations (Malta, Croatia)
+  'EasternMost'  = '#8B1A1A'   # Dark red – easternmost populations (Greece)
+)
+
+# Prepare the chord data: normalize movement matrix rows to proportions
+# so that each row sums to 1, representing the proportion of each
+# origin group's individuals at each non-breeding destination.
+move_prop_group <- prop.table(move_matrix_group, margin = 1)
+
+# Population-weighted chord widths: multiply proportions by relative abundance
+# so that more abundant populations have wider sectors, reflecting their
+# true demographic weight rather than sampling effort alone.
+chord_mat_group <- move_prop_group * rel_abund_group
+
+# Assign colours to origins (breeding groups) and destinations (non-breeding areas)
+# Destinations receive lighter versions of the dominant origin colour to distinguish
+# the two sides of the diagram while maintaining visual coherence.
+origin_names <- rownames(chord_mat_group)
+dest_names   <- colnames(chord_mat_group)
+
+# Map destination colour to the dominant contributing origin population
+dest_cols <- sapply(dest_names, function(dest) {
+  # The destination receives the colour of the breeding group sending the most birds
+  dominant_origin <- origin_names[which.max(chord_mat_group[, dest])]
+  adjustcolor(group_colours[dominant_origin], alpha.f = 0.7)
+})
+
+all_cols <- c(group_colours[origin_names], dest_cols)
+
+# Generate chord diagram
+# circos.clear() resets any previous circos plot state
+circos.clear()
+par(mar = c(0, 0, 2, 0))
+
+# chordDiagram() parameters:
+# - directional = 1: arrows indicate direction of movement (from breeding to non-breeding)
+# - direction.type = "arrows": arrow heads on chords to indicate direction
+# - link.arr.type = "big.arrow": arrowhead style
+# - annotationTrack = "grid": show sector labels as a grid track
+# - preAllocateTracks = 1: allocate space for custom annotation track
+chordDiagram(
+  chord_mat_group,
+  grid.col         = all_cols,
+  directional      = 1,
+  direction.type   = "arrows",
+  link.arr.type    = "big.arrow",
+  annotationTrack  = "grid",
+  preAllocateTracks = 1,
+  transparency     = 0.3
+)
+
+# Add sector labels outside the grid track
+circos.trackPlotRegion(track.index = 1, panel.fun = function(x, y) {
+  xlim <- get.cell.meta.data("xlim")
+  xmid <- mean(xlim)
+  circos.text(
+    xmid, 1.2,
+    get.cell.meta.data("sector.index"),
+    facing = "clockwise", niceFacing = TRUE, adj = c(0, 0.5), cex = 0.8
+  )
+}, bg.border = NA)
+
+title("Migratory Connectivity – Group Level\n(chord width ∝ population-weighted individual flow)")
+circos.clear()
+```
+
+### 16.2 Taxon-Level Chord Diagram
+
+```{r chord-taxon, fig.width=8, fig.height=8}
+# Taxon-level colours
+taxon_colours <- c(
+  'P. mauretanicus' = '#2166AC',  # Blue – Balearic shearwater
+  'P. yelkouan'     = '#D6604D'   # Orange – Yelkouan shearwater
+)
+
+# Population-weighted chord matrix
+move_prop_taxon <- prop.table(move_matrix_taxon, margin = 1)
+chord_mat_taxon <- move_prop_taxon * rel_abund_taxon
+
+# Destination colours (lighter shades of the dominant contributing taxon)
+dest_names_tax <- colnames(chord_mat_taxon)
+dest_cols_tax  <- sapply(dest_names_tax, function(dest) {
+  dominant <- rownames(chord_mat_taxon)[which.max(chord_mat_taxon[, dest])]
+  adjustcolor(taxon_colours[dominant], alpha.f = 0.7)
+})
+all_cols_tax <- c(taxon_colours, dest_cols_tax)
+
+circos.clear()
+par(mar = c(0, 0, 2, 0))
+chordDiagram(
+  chord_mat_taxon,
+  grid.col          = all_cols_tax,
+  directional       = 1,
+  direction.type    = "arrows",
+  link.arr.type     = "big.arrow",
+  annotationTrack   = "grid",
+  preAllocateTracks = 1,
+  transparency      = 0.3
+)
+circos.trackPlotRegion(track.index = 1, panel.fun = function(x, y) {
+  xlim <- get.cell.meta.data("xlim")
+  xmid <- mean(xlim)
+  circos.text(
+    xmid, 1.2,
+    get.cell.meta.data("sector.index"),
+    facing = "clockwise", niceFacing = TRUE, adj = c(0, 0.5), cex = 0.8
+  )
+}, bg.border = NA)
+title("Migratory Connectivity – Taxon Level\n(chord width ∝ population-weighted individual flow)")
+circos.clear()
+```
+
+### 16.3 Sub-Population (Colony) Level Chord Diagram
+
+```{r chord-colony, fig.width=10, fig.height=10}
+# Assign each colony to its group for colour-coding by biogeographic group membership
+colony_group_map <- setNames(
+  c('WesternMost', 'WesternMost',
+    'Central-West', 'Central-West', 'Central-West',
+    'Central-East', 'Central-East', 'Central-East', 'Central-East',
+    'EasternMost', 'EasternMost'),
+  c('Sa Conillera', 'Sa Cella',
+    'La Mola', 'Porquerolles', 'Port-Cros',
+    'Colata', 'Majjistral', 'Rdum', 'Zaklopatica',
+    'Gyaros', 'Kappari')
+)
+
+# Assign colony colour based on group membership
+colony_colours <- group_colours[colony_group_map[col_order_mc]]
+names(colony_colours) <- col_order_mc
+
+# Population-weighted chord matrix (using colony-level relative abundances)
+move_prop_col   <- prop.table(move_matrix_colony, margin = 1)
+chord_mat_col   <- move_prop_col * rel_abund_col
+
+# Destination colours
+dest_names_col <- colnames(chord_mat_col)
+dest_cols_col  <- sapply(dest_names_col, function(dest) {
+  dominant_col   <- col_order_mc[which.max(chord_mat_col[, dest])]
+  dominant_group <- colony_group_map[dominant_col]
+  adjustcolor(group_colours[dominant_group], alpha.f = 0.7)
+})
+all_cols_col <- c(colony_colours, dest_cols_col)
+
+circos.clear()
+par(mar = c(0, 0, 2, 0))
+chordDiagram(
+  chord_mat_col,
+  grid.col          = all_cols_col,
+  directional       = 1,
+  direction.type    = "arrows",
+  link.arr.type     = "big.arrow",
+  annotationTrack   = "grid",
+  preAllocateTracks = 1,
+  transparency      = 0.3
+)
+circos.trackPlotRegion(track.index = 1, panel.fun = function(x, y) {
+  xlim <- get.cell.meta.data("xlim")
+  xmid <- mean(xlim)
+  circos.text(
+    xmid, 1.2,
+    get.cell.meta.data("sector.index"),
+    facing = "clockwise", niceFacing = TRUE, adj = c(0, 0.5), cex = 0.7
+  )
+}, bg.border = NA)
+title("Migratory Connectivity – Colony Level\n(chord width ∝ population-weighted individual flow)")
+circos.clear()
+```
+
+## 17. MC Statistic Summary Figure
+
+We produce a dot-and-whisker plot summarising the MC estimates and their 95% confidence intervals across the three analysis levels. This figure allows direct visual comparison of connectivity strength and uncertainty at each scale.
+
+```{r mc-plot, fig.width=6, fig.height=4}
+# Set factor order for plotting (finest to coarsest scale on y-axis)
+mc_summary$Level <- factor(
+  mc_summary$Level,
+  levels = c('Sub-population (colony)', 'Group', 'Taxon')
+)
+
+p_mc <- ggplot(mc_summary, aes(x = MC, y = Level)) +
+  # 95% CI shown as horizontal error bar
+  geom_errorbarh(
+    aes(xmin = Lower_95CI, xmax = Upper_95CI),
+    height = 0.2, linewidth = 0.8, color = "grey40"
+  ) +
+  # MC point estimate
+  geom_point(size = 4, shape = 21, fill = "steelblue", color = "black") +
+  # Reference line at MC = 0 (no connectivity)
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey60") +
+  # Reference line at MC = 1 (perfect connectivity) for scale
+  geom_vline(xintercept = 1, linetype = "dotted",  color = "grey80") +
+  scale_x_continuous(
+    limits = c(-0.2, 1.1),
+    breaks = c(-0.2, 0, 0.2, 0.4, 0.6, 0.8, 1.0),
+    name   = "Migratory Connectivity (MC)"
+  ) +
+  labs(
+    y       = "Analysis Level",
+    title   = "Migratory Connectivity Across Spatial Scales",
+    caption = "Points = MC estimate; bars = 95% bootstrap confidence interval\nDashed line: MC = 0 (no connectivity)"
+  ) +
+  theme_classic() +
+  theme(
+    axis.text    = element_text(size = 11),
+    axis.title   = element_text(size = 12),
+    plot.title   = element_text(hjust = 0.5, face = "bold"),
+    plot.caption = element_text(size = 9, color = "grey50", hjust = 0)
+  )
+
+print(p_mc)
+```
+
+---
+
+# Export Figures
+
+```{r export-figures}
+# Export the MC summary figure at publication quality
+ggsave(
+  filename = "Fig4_MC_summary.png",
+  plot     = p_mc,
+  width    = 150,
+  height   = 90,
+  units    = "mm",
+  dpi      = 600,
+  bg       = "white"
+)
+cat("✓ Fig4_MC_summary.png exported (600 DPI)\n")
+
+# Export the chord diagrams as PNG files
+# Group-level chord diagram
+png("Fig4_chord_group.png", width = 180, height = 180, units = "mm", res = 600)
+par(mar = c(0, 0, 2, 0))
+circos.clear()
+chordDiagram(
+  chord_mat_group,
+  grid.col          = all_cols,
+  directional       = 1,
+  direction.type    = "arrows",
+  link.arr.type     = "big.arrow",
+  annotationTrack   = "grid",
+  preAllocateTracks = 1,
+  transparency      = 0.3
+)
+circos.trackPlotRegion(track.index = 1, panel.fun = function(x, y) {
+  xlim <- get.cell.meta.data("xlim"); xmid <- mean(xlim)
+  circos.text(xmid, 1.2, get.cell.meta.data("sector.index"),
+              facing = "clockwise", niceFacing = TRUE, adj = c(0, 0.5), cex = 0.7)
+}, bg.border = NA)
+title("Migratory Connectivity – Group Level")
+circos.clear()
+dev.off()
+cat("✓ Fig4_chord_group.png exported (600 DPI)\n")
+
+# Taxon-level chord diagram
+png("Fig4_chord_taxon.png", width = 180, height = 180, units = "mm", res = 600)
+par(mar = c(0, 0, 2, 0))
+circos.clear()
+chordDiagram(
+  chord_mat_taxon,
+  grid.col          = all_cols_tax,
+  directional       = 1,
+  direction.type    = "arrows",
+  link.arr.type     = "big.arrow",
+  annotationTrack   = "grid",
+  preAllocateTracks = 1,
+  transparency      = 0.3
+)
+circos.trackPlotRegion(track.index = 1, panel.fun = function(x, y) {
+  xlim <- get.cell.meta.data("xlim"); xmid <- mean(xlim)
+  circos.text(xmid, 1.2, get.cell.meta.data("sector.index"),
+              facing = "clockwise", niceFacing = TRUE, adj = c(0, 0.5), cex = 0.7)
+}, bg.border = NA)
+title("Migratory Connectivity – Taxon Level")
+circos.clear()
+dev.off()
+cat("✓ Fig4_chord_taxon.png exported (600 DPI)\n")
+
+# Colony-level chord diagram
+png("Fig4_chord_colony.png", width = 200, height = 200, units = "mm", res = 600)
+par(mar = c(0, 0, 2, 0))
+circos.clear()
+chordDiagram(
+  chord_mat_col,
+  grid.col          = all_cols_col,
+  directional       = 1,
+  direction.type    = "arrows",
+  link.arr.type     = "big.arrow",
+  annotationTrack   = "grid",
+  preAllocateTracks = 1,
+  transparency      = 0.3
+)
+circos.trackPlotRegion(track.index = 1, panel.fun = function(x, y) {
+  xlim <- get.cell.meta.data("xlim"); xmid <- mean(xlim)
+  circos.text(xmid, 1.2, get.cell.meta.data("sector.index"),
+              facing = "clockwise", niceFacing = TRUE, adj = c(0, 0.5), cex = 0.65)
+}, bg.border = NA)
+title("Migratory Connectivity – Colony Level")
+circos.clear()
+dev.off()
+cat("✓ Fig4_chord_colony.png exported (600 DPI)\n")
+```
+
+---
+
+# Discussion
+
+The migratory connectivity analyses quantify the degree to which breeding populations of Mediterranean shearwaters maintain spatial segregation during the non-breeding season. The hierarchical approach — analysing connectivity at the taxon, group, and colony level — reveals how spatial structure at breeding grounds is preserved or eroded during winter.
+
+The MC statistic and its confidence intervals provide a standardised, population-weighted measure of connectivity that accounts for both the spatial separation of sites and the relative demographic importance of each breeding population. By using cost-distance matrices computed exclusively through ocean corridors, the estimates reflect the realistic movement constraints faced by seabirds crossing geographic barriers.
+
+The chord diagrams complement the MC statistics by providing a visual representation of the actual movement flows, allowing identification of which specific origin–destination pairs contribute most to, or deviate most from, the overall pattern of connectivity.
+
+---
+
+# Session Information
+
+```{r session-info}
+sessionInfo()
+```
