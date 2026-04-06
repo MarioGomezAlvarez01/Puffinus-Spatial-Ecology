@@ -1,0 +1,907 @@
+---
+title: "Migratory Connectivity Analysis"
+author: "Mario Gómez Álvarez"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    code_folding: hide
+    theme: minimal
+    number_sections: true
+    fig_width: 12
+    fig_height: 8
+  pdf_document:
+    toc: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo      = TRUE,
+  warning   = FALSE,
+  message   = FALSE,
+  fig.align = 'center',
+  dpi       = 300
+)
+Sys.setenv(TZ = 'GMT')
+```
+
+## Introduction
+
+This document estimates the strength of **migratory connectivity** (MC) for Mediterranean
+shearwaters at three hierarchical levels:
+
+1. **Taxon level** — Balearic (PUFMAU) vs. Yelkouan (PUFYEL) shearwaters.
+2. **Biogeographical Population level** — Four biogeographic groups (WesternMost, Central-West,
+   Central-East, EasternMost).
+3. **Population level** — Individual breeding populations within each group.
+
+---
+
+# Setup
+
+## Packages
+
+```{r packages}
+packages <- c(
+  "tidyverse", "sf", "gdistance",
+  "MigConnectivity",
+  "rnaturalearth", "rnaturalearthdata",
+  "circlize", "knitr", "kableExtra","RANN"
+)
+
+invisible(lapply(packages, library, character.only = TRUE))
+```
+
+## Coordinate Reference Systems
+
+```{r projections}
+CRS_GEO <- "EPSG:4326"
+CRS_AEQD <- "+proj=aeqd +lat_0=38 +lon_0=15 +datum=WGS84 +units=m +no_defs"
+CRS_MOLL <- "+proj=moll +lon_0=0 +datum=WGS84 +units=m +no_defs"
+```
+
+# Ocean Raster Creation
+
+This section creates or loads the ocean raster for cost-distance calculations. The raster
+defines ocean (value = 1) and land (value = 0) for the Mediterranean region.
+
+```{r ocean-raster-creation}
+# Define Mediterranean extent
+xmin <- -20
+xmax <- 50
+ymin <- 20
+ymax <- 55
+resolution <- 0.05
+
+# Create empty raster template
+ocean.r <- raster(
+  xmn = xmin, xmx = xmax,
+  ymn = ymin, ymx = ymax,
+  res = resolution,
+  crs = CRS(CRS_GEO)
+)
+
+# Get land polygons from rnaturalearth
+land_sf <- ne_countries(scale = "medium", returnclass = "sf") %>%
+  st_union()
+
+# Convert sf to sp for rasterization 
+land_sp <- as_Spatial(land_sf)
+
+# Rasterize land polygons: land areas will have a value, NA elsewhere
+ocean.r <- rasterize(land_sp, ocean.r, field = 1)
+
+# Convert: land = 0, ocean = 1
+ocean.r[!is.na(ocean.r)] <- 0  # Land cells set to 0
+ocean.r[is.na(ocean.r)] <- 1    # Ocean cells set to 1
+
+cat("Ocean raster created:\n")
+```
+
+---
+
+# Helper Functions 
+
+Three reusable functions encapsulate the data-preparation steps that recur at
+every analysis level.
+
+```{r fn-relocate}
+assign_centroid_from_zones <- function(tracking_df, zones_sf, ocean_raster) {
+
+  pts_sf <- st_as_sf(tracking_df,
+                     coords = c("Lon", "Lat"),
+                     crs = CRS_GEO,
+                     remove = FALSE)
+
+  # Keep ONLY ocean points
+  ocean_flag <- raster::extract(ocean_raster, st_coordinates(pts_sf)) == 1
+  pts_sf <- pts_sf[ocean_flag, ]
+
+  # Spatial join only ocean-valid points
+  joined <- st_join(pts_sf, zones_sf, join = st_within)
+
+  # Keep valid site assignments
+  joined <- joined %>%
+    filter(!is.na(site_id))
+
+  counts <- joined %>%
+    st_drop_geometry() %>%
+    group_by(geo_trip, site_id) %>%
+    summarise(n = n(), .groups = "drop")
+
+  dominant_zone <- counts %>%
+    group_by(geo_trip) %>%
+    slice_max(n, n = 1, with_ties = FALSE) %>%
+    ungroup()
+
+  cat("\n--- Zone assignment diagnostics ---\n")
+  print(table(dominant_zone$site_id, useNA = "ifany"))
+  cat("----------------------------------\n\n")
+
+  zone_centroids <- st_centroid(zones_sf)
+
+  zone_centroids_df <- zone_centroids %>%
+    st_drop_geometry() %>%
+    bind_cols(st_coordinates(zone_centroids) %>% as.data.frame())
+
+  result <- dominant_zone %>%
+    left_join(zone_centroids_df, by = "site_id") %>%
+    rename(Lon = X, Lat = Y)
+
+  return(result)
+}
+```
+
+## `prepare_analysis_level()`
+
+```{r fn-prepare}
+#' Prepare individual-level origin and target data for `estMC()`
+
+prepare_analysis_level <- function(tracking_df, pops_include = NULL, zones_sf) {
+
+  df <- tracking_df 
+  
+  if(!is.null(pops_include)){
+  df <- df %>% 
+    filter(Population %in% pops_include)}
+
+  if (nrow(df) == 0L)
+    stop("No tracking records match the requested populations.")
+
+  # Assign points to targetSites
+  win_pts <- assign_centroid_from_zones(df, zones_sf, ocean.r)
+
+  df <- df%>%
+    rename(Lon_win_og = Lon, Lat_win_og = Lat) %>%
+    left_join(win_pts, by = "geo_trip")
+  
+  # Reasses NAs using the individual centroid
+  df_ok  <- df %>% filter(!is.na(Lon), !is.na(Lat))%>%
+    dplyr::select(-Lon_win_og,-Lat_win_og)
+  
+  df_na  <- df %>% filter(is.na(Lon) | is.na(Lat))%>%
+    group_by(geo_trip)%>%
+    mutate(
+      Lon_win_og = mean(Lon_win_og, na.rm = TRUE),
+      Lat_win_og = mean(Lat_win_og, na.rm = TRUE)
+      )%>%
+    ungroup
+  
+  na_sf <- st_as_sf(df_na, coords = c("Lon_win_og", "Lat_win_og"), crs = CRS_GEO)
+  
+  # Assign to the nearest zone
+  nearest_zone <- st_nearest_feature(na_sf, targetSites)
+  df_na$site_id <- targetSites$site_id[nearest_zone]
+  df_na <- df_na %>%
+    mutate(Lon = Lon_win_og, Lat = Lat_win_og)%>%
+    dplyr::select(-Lon_win_og,-Lat_win_og)
+  
+  df_fixed <- bind_rows(df_ok, df_na)%>%
+    distinct()
+  
+  # originPoints: breeding colony location for each individual
+  originPoints <- st_as_sf(df_fixed, coords = c("Lon_col", "Lat_col"), crs = CRS_GEO)
+
+  # targetPoints: individual wintering centroid for each individual
+  targetPoints <- st_as_sf(df_fixed, coords = c("Lon", "Lat"), crs = CRS_GEO)
+  
+  list(
+    originPoints = originPoints,
+    targetPoints = targetPoints,
+    n            = nrow(df_fixed)
+    )
+}
+```
+#' Calculate marine cost-distance matrix from origin or target sites
+#'
+#' Uses a raster-based cost-distance approach with gdistance package.
+#' Requires an ocean raster (land = 0, ocean = 1).
+
+``` {r cal_dist}
+calculate_distance_matrix <- function(sites_sf, ocean_raster) {
+  
+  # Centroids of the polygons
+  sites_centroids <- st_centroid(sites_sf)
+  sites_centroids <- st_transform(sites_centroids, CRS_GEO)
+  
+  sites <- as.data.frame(st_coordinates(sites_centroids))
+  colnames(sites) <- c("X", "Y")
+  
+  # Detect those points in land
+  sites.to.relocate <- raster::extract(ocean_raster, sites) == 0
+  
+  if (any(sites.to.relocate)) {
+    
+    cat(sprintf("\n.....................................................................\n"))
+    cat(sprintf("%d site(s) to be relocated from land to ocean.\n", sum(sites.to.relocate)))
+    cat(sprintf(".....................................................................\n\n"))
+    
+    # Obtain points of the ocean raster
+    ocean_cells <- rasterToPoints(ocean_raster, fun = function(x) x == 1)
+    ocean_coords <- ocean_cells[, 1:2]  # X, Y
+    
+    land_sites <- sites[sites.to.relocate, ]
+    
+    # KNN → closest neighbor
+    nn <- nn2(data = ocean_coords, query = land_sites, k = 1)
+    
+    sites[sites.to.relocate, ] <- ocean_coords[nn$nn.idx, ]
+  }
+  
+  # Cost surface
+  cost_surface <- ocean_raster
+  projection(cost_surface) <- CRS(CRS_GEO)
+  
+  raster_tr <- transition(cost_surface, mean, directions = 8)
+  raster_tr_corrected <- geoCorrection(raster_tr, type = "c", multpl = FALSE)
+  
+  # Cost distance
+  raster_cosDist <- costDistance(
+    raster_tr_corrected,
+    as.matrix(sites),
+    as.matrix(sites)
+  )
+  
+  return(as.matrix(raster_cosDist))
+}
+```
+
+---
+
+# Data Loading {#data}
+
+```{r load-data}
+
+# Load phenological data; retain migrants with known departure dates
+
+phen_all <- read.csv("Phen_data.csv") %>% filter(complete != "Uncomplete")%>%
+  mutate(
+    BA_dep_date = as.POSIXct(BA_dep_date, format = "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"),
+    BA_arr_date = as.POSIXct(BA_arr_date, format = "%Y-%m-%dT%H:%M:%SZ", tz = "UTC")
+  ) %>%
+  dplyr::select(geo_trip, BA_dep_date, BA_arr_date)
+
+# True colony coordinates
+colonies <- read.csv("colonies_coords.csv") 
+
+# Geolocator tracking data — individual wintering centroids
+# Computed as the mean position during the core non-breeding months (August-September)
+# Restricted to migrant individuals identified via phen_data
+tracking <- read.csv("all_trips.csv") %>%
+  filter(geo_trip %in% unique(phen_all$geo_trip)) %>%
+  filter(month %in% c(8,9)) %>% 
+  left_join(
+    colonies %>% dplyr::select(Colony, Lon_col = Lon, Lat_col = Lat),
+    by = c("Colony")
+  )%>%
+  dplyr::select(-Date_Time,-month)
+
+
+cat(sprintf("Tracking records: %d migrants across %d colonies\n",
+            n_distinct(tracking$geo_trip), n_distinct(tracking$Colony)))
+```
+---
+
+# Site Definitions {#sites}
+
+`estMC()` requires geographic polygons that partition the breeding range into
+**origin sites** and the non-breeding range into **target sites**. Assignments
+of individuals to sites — and the resulting psi matrix — are computed internally
+by `estMC()`.
+
+## Origin Sites
+
+Each breeding colony is represented by a circular buffer of radius 50 km,
+giving one origin polygon per population. Group- and taxon-level polygons
+are formed by dissolving individual colony buffers.
+
+```{r origin-sites-dist}
+# Convert colony table to sf and project for buffering
+colonies_sf <- st_as_sf(colonies, coords = c("Lon", "Lat"), crs = CRS_GEO)
+colonies_proj <- st_transform(colonies_sf, CRS_AEQD)
+
+# Individual colony buffers (2 km radius)
+originSites_col <- colonies_proj %>%
+  mutate(geometry = st_buffer(geometry, dist = 2000)) %>%
+  st_transform(CRS_GEO) %>%
+  dplyr::select(Colony,Pop,Group,Taxon)
+
+# Separate by group
+originSites_WM <- originSites_col %>%
+  filter(Group == "WesternMost")
+originSites_CW <- originSites_col %>%
+  filter(Group == "Central-West")
+originSites_CE <- originSites_col %>%
+  filter(Group == "Central-East")
+originSites_EM <- originSites_col %>%
+  filter(Group == "EasternMost")
+
+# Group-level origin polygons (union of colony buffers within each group)
+originSites_group <- originSites_col %>%
+  group_by(Group) %>%
+  summarise(geometry = st_union(geometry), .groups = "drop") %>%
+  rename(site_id = Group)
+
+# Group-level distance
+originDist_group <- calculate_distance_matrix(originSites_group, ocean.r)
+colnames(originDist_group) <- rownames(originDist_group) <-  originSites_group$site_id
+
+cat("Group origin distance matrix:\n")
+print(round(originDist_group, 1))
+
+# Taxon-level origin polygons (union of colony buffers within each taxon)
+originSites_taxon <- originSites_col %>%
+  group_by(Taxon) %>%
+  summarise(geometry = st_union(geometry), .groups = "drop") %>%
+  rename(site_id = Taxon)
+
+# Taxon-level distance
+originDist_taxon <- calculate_distance_matrix(originSites_taxon, ocean.r)
+colnames(originDist_taxon) <- rownames(originDist_taxon) <- originSites_taxon$site_id
+
+cat("Taxon origin distance matrix:\n")
+print(round(originDist_taxon, 1))
+
+cat("Origin sites defined:\n")
+cat(" Colony level:", nrow(originSites_col),    "points\n")
+cat(" Group level: ", nrow(originSites_group), "points\n")
+cat(" Taxon level: ", nrow(originSites_taxon), "points\n")
+```
+
+## Target Sites
+
+Non-breeding (wintering) target regions correspond directly to the **WA** (wintering
+area) categories recorded in `phen_data` for the original study. The eight named
+regions are: Alboran Sea, Western Mediterranean, Central Mediterranean, Adriatic Sea,
+Aegean Sea, Black Sea, Saharan Upwelling, and South European Atlantic Shelf.
+
+```{r target-sites-dist}
+
+targetSites <- readRDS("targetSites_MC.rds")
+
+cat("Target sites defined:", nrow(targetSites), "wintering zones\n")
+print(targetSites$site_id)
+
+targetDist <- calculate_distance_matrix(targetSites, ocean.r)
+colnames(targetDist) <- rownames(targetDist) <- targetSites$site_id
+
+cat("Target distance matrix:\n")
+print(round(targetDist, 1))
+```
+---
+# Relative abundances of the origin Sites 
+
+```{r rel-ab}
+# === TAXON LEVEL ===
+pop_sizes_taxa <- matrix(
+  c(originSites_taxon$site_id,c(3000*2, 27610*2)),
+  nrow=2,ncol=2
+  )
+originRelAbund_taxa <- c(
+  as.numeric(pop_sizes_taxa[1,2])/sum(as.numeric(pop_sizes_taxa[,2])),
+  as.numeric(pop_sizes_taxa[2,2])/sum(as.numeric(pop_sizes_taxa[,2]))
+  )
+
+# === POPULATION/GROUP LEVEL ===
+pop_sizes_group <- matrix(c(
+  originSites_group$site_id,
+  c(1685*2+400*2,885*2+4500*2,8500*2,3000*2+300*2)), # CE,CW,EM,WM
+  nrow=4,ncol=2)
+
+### Relative abundance ####
+
+originRelAbund_group <- c(
+  as.numeric(pop_sizes_group[1,2])/sum(as.numeric(pop_sizes_group[,2])),
+  as.numeric(pop_sizes_group[2,2])/sum(as.numeric(pop_sizes_group[,2])),
+  as.numeric(pop_sizes_group[3,2])/sum(as.numeric(pop_sizes_group[,2])),
+  as.numeric(pop_sizes_group[4,2])/sum(as.numeric(pop_sizes_group[,2]))
+  )
+
+
+# === SUB-POPULATION: WesternMost ===
+pop_sizes_WM <- matrix(c(
+  originSites_WM$Colony,c(300*2, 530*2, 900*2)),#La Mola, Sa Conillera, Sa Cella
+  nrow=3,ncol=2)
+
+originRelAbund_WM <- c(
+  as.numeric(pop_sizes_WM[1, 2]) / sum(as.numeric(pop_sizes_WM[, 2])),
+  as.numeric(pop_sizes_WM[2, 2]) / sum(as.numeric(pop_sizes_WM[, 2]))
+)
+
+# === SUB-POPULATION: Central-West ===
+pop_sizes_CW <- matrix(c(
+  originSites_CW$Colony,c(4500*2,93*2,189*2)),#Colata,La Mola,Porquerolles,Port-Cros
+  nrow=3,ncol=2)
+
+originRelAbund_CW <- c(
+  as.numeric(pop_sizes_CW[1, 2]) / sum(as.numeric(pop_sizes_CW[, 2])),
+  as.numeric(pop_sizes_CW[2, 2]) / sum(as.numeric(pop_sizes_CW[, 2])),
+  as.numeric(pop_sizes_CW[3, 2]) / sum(as.numeric(pop_sizes_CW[, 2])),
+  as.numeric(pop_sizes_CW[4, 2]) / sum(as.numeric(pop_sizes_CW[, 2]))
+)
+
+# === SUB-POPULATION: Central-East ===
+pop_sizes_CE <- matrix(c(
+  originSites_CE$Colony,c(200*2,300*2,207*2,34*2)),#Majjistral,Rdum,Zaklopatica,Veli Maslovnjak
+  nrow=4,ncol=2)
+
+originRelAbund_CE<- c(
+  as.numeric(pop_sizes_CE[1, 2]) / sum(as.numeric(pop_sizes_CE[, 2])),
+  as.numeric(pop_sizes_CE[2, 2]) / sum(as.numeric(pop_sizes_CE[, 2])),
+  as.numeric(pop_sizes_CE[3, 2]) / sum(as.numeric(pop_sizes_CE[, 2])),
+  as.numeric(pop_sizes_CE[4, 2]) / sum(as.numeric(pop_sizes_CE[, 2]))
+)
+
+# === SUB-POPULATION: EasternMost  ===
+pop_sizes_EM <- matrix(c(
+  originSites_EM$Colony,c(1000*2, 1730*2)),#Gyaros, Kappari
+  nrow=2,ncol=2)
+
+originRelAbund_EM <- c(
+  as.numeric(pop_sizes_EM[1, 2]) / sum(as.numeric(pop_sizes_EM[, 2])),
+  as.numeric(pop_sizes_EM[2, 2]) / sum(as.numeric(pop_sizes_EM[, 2]))
+)
+cat("Relative abundance vectors calculated for all levels.\n")
+
+```
+---
+
+# Taxon-Level Analysis {#taxon}
+
+We first estimate MC at the broadest taxonomic level, contrasting the two
+Mediterranean shearwater taxa Origin sites are the merged colony polygons
+for each taxon; target sites are the wintering zones defined above.
+
+## Prepare Data
+
+```{r taxon-data}
+dat_taxon <- prepare_analysis_level(
+  tracking_df  = tracking,
+  zones_sf = targetSites
+)
+
+cat(sprintf("Taxon-level analysis: %d individuals total\n", dat_taxon$n))
+cat("Sample sizes by taxon:\n")
+print(table(dat_taxon$targetPoints$Taxon))
+
+```
+
+```{r convert-meters-AEQD}
+# Convert spatial objects to AEQD (meters)
+
+# originPoints and targetPoints
+dat_taxon$originPoints <- st_transform(dat_taxon$originPoints, CRS_AEQD)
+dat_taxon$targetPoints <- st_transform(dat_taxon$targetPoints, CRS_AEQD)
+
+# originSites and targetSites
+originSites_taxon <- st_transform(originSites_taxon, CRS_AEQD)
+targetSites <- st_transform(targetSites, CRS_AEQD)
+```
+
+## Estimate MC — Taxon Level
+
+```{r taxon-estMC}
+mc_taxon <- estMC(
+  isGL         = FALSE, # as we use modeled positions there is no need to add model error
+  originDist   = originDist_taxon,
+  targetDist   = targetDist,
+  originPoints = dat_taxon$originPoints,
+  targetPoints = dat_taxon$targetPoints,
+  originSites  = originSites_taxon,
+  targetSites  = targetSites,
+  originNames  = originSites_taxon$site_id,
+  targetNames  = targetSites$site_id,
+  originRelAbund = originRelAbund_taxa,
+  nSim         = 1000,
+  nSamples     = 1000,
+  verbose      = FALSE
+)
+
+cat("=== Taxon-level MC estimate ===\n")
+print(mc_taxon)
+```
+---
+
+# Population-Level Analysis {#populations}
+
+We next estimate MC across the four biogeographic groups, using group-level
+dissolved origin polygons.
+
+## Prepare Data
+
+```{r pop-data}
+dat_pop <- prepare_analysis_level(
+  tracking_df  = tracking,
+  pops_include = pop_order,
+  zones_sf = targetSites
+)
+
+cat(sprintf("Taxon-level analysis: %d individuals total\n", dat_pop$n))
+cat("Sample sizes by taxon:\n")
+print(table(dat_taxon$targetPoints$Group))
+
+```
+
+```{r convert-meters-AEQD}
+# Convert spatial objects to AEQD (meters)
+
+# originPoints and targetPoints
+dat_pop$originPoints <- st_transform(dat_pop$originPoints, CRS_AEQD)
+dat_pop$targetPoints <- st_transform(dat_pop$targetPoints, CRS_AEQD)
+
+# originSites
+originSites_group <- st_transform(originSites_group, CRS_AEQD)
+```
+
+## Estimate MC — Population Level
+
+```{r pop-estMC}
+mc_pop <- estMC(
+  isGL         = FALSE,
+  originDist   = originDist_group,
+  targetDist   = targetDist,
+  originPoints = dat_pop$originPoints,
+  targetPoints = dat_pop$targetPoints,
+  originSites  = originSites_group,
+  targetSites  = targetSites,
+  originNames  = originSites_group$site_id,
+  targetNames  = targetSites$site_id,
+  originRelAbund = originRelAbund_group,
+  nSim         = 1000,
+  nSamples     = 1000,
+  verbose      = FALSE
+)
+
+cat("=== Population-level MC estimate ===\n")
+print(mc_pop)
+```
+---
+
+# Sub-Population Analyses {#subpopulations}
+
+Finally, we estimate MC *within* each biogeographic group, treating individual
+breeding colonies as origin nodes. This reveals whether connectivity is driven
+by among-group or within-group structure.
+
+## WesternMost (Sa Conillera & Sa Cella)
+
+```{r wm-prep}
+dat_WM <- prepare_analysis_level(
+  tracking_df  = tracking,
+  pops_include = group_membership$WesternMost,
+  zones_sf = targetSites
+)
+
+cat(sprintf("WesternMost: %d individuals\n", dat_WM$n))
+
+# Origin distance
+originDist_WM <- calculate_distance_matrix(originSites_WM, ocean.r)
+colnames(originDist_WM) <- rownames(originDist_WM) <-  originSites_WM$Colony
+
+cat("Group origin distance matrix:\n")
+print(round(originDist_WM, 1))
+```
+
+```{r convert-meters-AEQD}
+# Convert spatial objects to AEQD (meters)
+
+# originPoints and targetPoints
+dat_WM$originPoints <- st_transform(dat_WM$originPoints, CRS_AEQD)
+dat_WM$targetPoints <- st_transform(dat_WM$targetPoints, CRS_AEQD)
+
+# originSites
+originSites_WM <- st_transform(originSites_WM, CRS_AEQD)
+```
+
+```{r wm-estMC}
+mc_WM <- estMC(
+  isGL         = FALSE,
+  originDist = originDist_WM,
+  targetDist = targetDist,
+  originPoints = dat_WM$originPoints,
+  targetPoints = dat_WM$targetPoints,
+  originSites  = originSites_WM,
+  targetSites  = targetSites,
+  originNames = originSites_WM$Colony,
+  targetNames = targetSites$site_id,
+  originRelAbund = originRelAbund_WM,
+  nSim        = 1000,
+  nSamples    = 1000,
+  verbose      = FALSE
+)
+
+cat("=== WesternMost sub-population MC ===\n")
+print(mc_WM)
+```
+
+## Central-West (MINORCA, FRANCE & SARDINIA) {#centralwest}
+
+```{r cw-prep}
+dat_CW <- prepare_analysis_level(
+  tracking_df  = tracking,
+  pops_include = group_membership$CentralWest,
+  zones_sf = targetSites
+)
+
+# Origin distance
+originDist_CW <- calculate_distance_matrix(originSites_CW, ocean.r)
+colnames(originDist_CW) <- rownames(originDist_CW) <-  originSites_CW$Colony
+
+cat("Group origin distance matrix:\n")
+print(round(originDist_CW, 1))
+```
+```{r convert-meters-AEQD}
+# Convert spatial objects to AEQD (meters)
+
+# originPoints and targetPoints
+dat_CW$originPoints <- st_transform(dat_CW$originPoints, CRS_AEQD)
+dat_CW$targetPoints <- st_transform(dat_CW$targetPoints, CRS_AEQD)
+
+# originSites 
+originSites_CW <- st_transform(originSites_CW, CRS_AEQD)
+```
+
+```{r cw-estMC}
+mc_CW <- estMC(
+  isGL         = FALSE,
+  originDist = originDist_CW,
+  targetDist = targetDist,
+  originPoints = dat_CW$originPoints,
+  targetPoints = dat_CW$targetPoints,
+  originSites  = originSites_CW,
+  targetSites  = targetSites,
+  originNames = originSites_CW$Colony,
+  targetNames = targetSites$site_id,
+  originRelAbund = originRelAbund_CW,
+  nSim         = 1000,
+  nSamples     = 1000,
+  verbose      = FALSE
+)
+
+cat("=== Central-West sub-population MC ===\n")
+print(mc_CW)
+```
+
+## Central-East (MALTA & CROATIA) {#centraleast}
+
+```{r ce-prep}
+dat_CE <- prepare_analysis_level(
+  tracking_df  = tracking,
+  pops_include = group_membership$CentralEast,
+  zones_sf = targetSites
+)
+
+cat(sprintf("Central-East: %d individuals\n", dat_CE$n))
+
+# Origin distance
+originDist_CE <- calculate_distance_matrix(originSites_CE, ocean.r)
+colnames(originDist_CE) <- rownames(originDist_CE) <-  originSites_CE$Colony
+
+cat("Group origin distance matrix:\n")
+print(round(originDist_CE, 1))
+```
+```{r convert-meters-AEQD}
+# Convert spatial objects to AEQD (meters)
+
+# originPoints and targetPoints
+dat_CE$originPoints <- st_transform(dat_CE$originPoints, CRS_AEQD)
+dat_CE$targetPoints <- st_transform(dat_CE$targetPoints, CRS_AEQD)
+
+# originSites 
+originSites_CE <- st_transform(originSites_CE, CRS_AEQD)
+
+```
+
+```{r ce-estMC}
+mc_CE <- estMC(
+  isGL         = FALSE,
+  originDist = originDist_CE,
+  targetDist = targetDist,
+  originPoints = dat_CE$originPoints,
+  targetPoints = dat_CE$targetPoints,
+  originSites  = originSites_CE,
+  targetSites  = targetSites,
+  originNames = originSites_CE$Colony,
+  targetNames = targetSites$site_id,
+  originRelAbund = originRelAbund_CE,
+  nSim         = 1000,
+  nSamples     = 1000,
+  verbose      = FALSE
+)
+
+cat("=== Central-East sub-population MC ===\n")
+print(mc_CE)
+```
+
+## EasternMost (GREECE)
+
+```{r em-prep}
+dat_EM <- prepare_analysis_level(
+  tracking_df  = tracking,
+  pops_include = group_membership$EasternMost,
+  zones_sf = targetSites
+)
+
+originSites_EM <- originSites_col %>%
+  filter(toupper(Pop) %in% group_membership$EasternMost)
+
+cat(sprintf("EasternMost: %d individuals\n", dat_EM$n))
+
+# Origin distance
+originDist_EM <- calculate_distance_matrix(originSites_EM, ocean.r)
+colnames(originDist_EM) <- rownames(originDist_EM) <-  originSites_EM$Colony
+
+cat("Group origin distance matrix:\n")
+print(round(originDist_EM, 1))
+
+```
+```{r convert-meters-AEQD}
+# Convert spatial objects to AEQD (meters)
+
+# originPoints and targetPoints
+dat_EM$originPoints <- st_transform(dat_EM$originPoints, CRS_AEQD)
+dat_EM$targetPoints <- st_transform(dat_EM$targetPoints, CRS_AEQD)
+
+# originSites 
+originSites_EM <- st_transform(originSites_EM, CRS_AEQD)
+
+```
+
+```{r em-estMC}
+mc_EM <- estMC(
+  isGL         = FALSE,
+  originDist = originDist_EM,
+  targetDist = targetDist,
+  originPoints = dat_EM$originPoints,
+  targetPoints = dat_EM$targetPoints,
+  originSites  = originSites_EM,
+  targetSites  = targetSites,
+  originNames = originSites_EM$Colony,
+  targetNames = targetSites$site_id,
+  originRelAbund = originRelAbund_EM,
+  resampleProjection = CRS_GEO,
+  nSim         = 1000,
+  nSamples     = 1000,
+  verbose      = FALSE
+)
+
+cat("=== EasternMost sub-population MC ===\n")
+print(mc_EM)
+```
+---
+
+# Visualization: Circlize Chord Diagram {#circlize}
+
+A chord diagram shows the proportion of tracked individuals from each
+breeding population that winter in each target zone. Chord width is
+proportional to the number of individuals.
+
+```{r circlize-data}
+
+assignments <- dat_taxon$targetPoints
+
+assignments$n <- 1
+
+pop_sizes <- as.data.frame(matrix(
+  c(
+    c('IBIZA','MALLORCA','MINORCA','FRANCE',
+      'SARDINIA','MALTA','CROATIA','GREECE'),
+    c(530*2,900*2, 300*2, 885*2, 4500*2, 1685*2, 400*2,8500*2)),
+  nrow=8,ncol=2))
+
+assignments <- assignments %>%
+  left_join(.,pop_sizes,by=c('Population'='V1'))%>%
+  mutate(pop_size = as.numeric(V2))%>%
+  dplyr::select(-V2)
+
+for_circle <- assignments %>% 
+  group_by(Group, Population, site_id, pop_size, n_col = n) %>%
+  dplyr::summarise(n_col_win = n()) %>% 
+  mutate(ind_weight = pop_size/n_col) %>% 
+  ungroup()
+
+
+for_circle_pop <- for_circle %>% 
+  dplyr::select(Group, Population, site_id, n_col_win, ind_weight) %>% 
+  mutate(circle_arch_value = n_col_win*ind_weight)
+
+for_plot <- for_circle_pop %>% 
+  mutate(Population = str_to_title(Population),
+         WA = case_when(
+           site_id == "South European Atlantic Shelf" ~ "S Euro-Atl Shelf",
+           site_id == "Saharan Upwelling" ~ "Saharan Upw",
+           site_id == "Western Mediterranean" ~ "Western Med",
+           site_id == "Central Mediterranean" ~ "Central Med",
+           TRUE ~ site_id
+         ))%>%
+  dplyr::select(Population, WA, circle_arch_value)
+
+union(for_plot[[1]], for_plot[[2]])
+
+new_order <- c("Ibiza","Mallorca",'Minorca','France','Sardinia','Malta','Croatia','Greece',
+               'Black Sea' , 'Levantine Sea','Aegean Sea' ,'Adriatic Sea','Central Med','Western Med', 
+               'Alboran Sea','Saharan Upw', 'S Euro-Atl Shelf')
+
+grid.col <-  c("Ibiza" = "#fde725",'Mallorca'='#dde318','Minorca' = "#bade28",'France' = "#95d840",'Sardinia' = "#75d054"
+                            ,'Malta' = "#56c667",'Croatia'= "#3dbc74",'Greece'= "#29af7f",
+                            'Black Sea' = "#21918c", 'Levantine Sea' = "#2b758e",'Aegean Sea' = "#33638d",'Adriatic Sea' = '#39558c','Central Med' = '#404688','Western Med' = "#453781", 
+                            'Alboran Sea' = '#482576','Saharan Upw' = "#481467", 'S Euro-Atl Shelf' = "#440154")
+
+```
+
+```{r circlize-plot, fig.width=9, fig.height=9}
+
+# Configurar parámetros
+circos.par(start.degree = 170, clock.wise = TRUE,
+           gap.after = c(rep(1, length(unique(for_plot[[1]])) - 1), 7,
+                         rep(1, length(unique(for_plot[[2]])) - 1), 7))
+
+# Crear chord diagram
+chordDiagram(for_plot, reduce = -1, order = new_order, grid.col = grid.col, 
+             link.sort = T, link.decreasing = T, link.zindex = rank(for_plot[[3]]),
+             directional = 1, direction.type = c("diffHeight", "arrows"), 
+             link.arr.type = "big.arrow", 
+             annotationTrack = c("grid"), annotationTrackHeight = c(0.05), 
+             preAllocateTracks = list(track.height = 0.5))
+
+# 1. Grupo Ibiza-Mallorca
+highlight.sector(sector.index = c("Ibiza", "Mallorca"), track.index = 1,
+                 col = NA, border = "black", lwd = 2,
+                 padding = c(0.2, 0, -1, 0))
+
+# 2. Grupo Minorca-France-Sardinia
+highlight.sector(sector.index = c("Minorca", "France", "Sardinia"), track.index = 1,
+                 col = NA, border = "black", lwd = 2,
+                 padding = c(0.2, 0, -1, 0))
+
+# 3. Grupo Malta-Croatia
+highlight.sector(sector.index = c("Malta", "Croatia"), track.index = 1,
+                 col = NA, border = "black", lwd = 2,
+                 padding = c(0.2, 0, -1, 0))
+
+# 4. Grupo Greece
+highlight.sector(sector.index = "Greece", track.index = 1,
+                 col = NA, border = "black", lwd = 2,
+                 padding = c(0.2, 0, -1, 0))
+
+# Añadir labels
+circos.track(track.index = 1, panel.fun = function(x, y) {
+  circos.text(CELL_META$xcenter, CELL_META$ylim[1], CELL_META$sector.index,
+              facing = "clockwise", niceFacing = TRUE, adj = c(0, 0.1), 
+              cex = 0.8)
+}, bg.border = NA)
+
+# Limpiar parámetros de circos
+circos.clear()
+```
+
+---
+
+# Session Information
+
+```{r session-info}
+sessionInfo()
+```
