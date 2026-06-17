@@ -1,0 +1,583 @@
+---
+title: "Environmental Niche Models: Presence Data Preparation"
+subtitle: "Hierarchical weighted resampling from KDE-simulated distributions"
+author: "Mario Gómez Álvarez"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    theme: cosmo
+    highlight: tango
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 10,
+  fig.height = 8
+)
+```
+
+# Overview
+
+This analysis prepares presence datasets for Environmental Niche Modeling (ENM) by:
+
+1. Creating spatial masks for breeding and non-breeding distributions
+2. Generating KDE-weighted pseudo-absence/resampled points from trip observations
+3. Applying hierarchical weighting at multiple levels:
+   - **Population level** (`w_pop`): Proportional to population size within species
+   - **Group level** (`w_group`): Proportional to population size within geographic groups
+   - **Species level** (`w_sp`): Proportional to species abundance
+
+The resulting datasets are thinned to reflect these weights, ensuring balanced representation across taxonomic and geographic scales.
+
+---
+
+# Setup and Data Loading
+
+## Library Dependencies
+
+```{r libraries}
+library(tidyverse)
+library(spatstat)
+library(raster)
+library(sf)
+library(rnaturalearth)
+library(spatstat.geom)
+library(adehabitatHR)
+```
+
+## Load Raw Trip Data
+
+```{r load-data}
+setwd('C:/Users/mario/OneDrive - Universitat de Barcelona/R_code')
+
+trips <- read_csv(
+  "C:/Users/mario/OneDrive - Universitat de Barcelona/Escritorio/github puffinus/all_trips_classified.csv"
+)
+
+head(trips)
+```
+
+---
+
+# Spatial Masks
+
+## Purpose
+
+Spatial masks confine KDE-based resampling to ecologically relevant regions:
+- **`final_mask`**: Breeding season (Mediterranean + Atlantic)
+- **`r_mask_gen`**: Non-breeding season (West Africa pelagic zone)
+- **`r_mask_pyel`**: Levantine basin (PUFYEL-specific region)
+
+## Create Base Raster and World Boundaries
+
+```{r create-raster}
+# Global raster template (0.25° resolution)
+world <- ne_countries(scale = 50, returnclass = "sf")
+rast <- raster(xmn = -15, xmx = 42, ymn = 28, ymx = 51, res = 0.25)
+r <- rasterize(world, rast)
+
+# CRS definition for all masks
+crs_string <- '+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs +towgs84=0,0,0'
+crs_object <- CRS(crs_string)
+```
+
+## Define Mask Polygons
+
+```{r create-mask-polygons}
+# Left boundary (Western Atlantic cutoff)
+mask_polygon_left <- st_polygon(
+  list(cbind(
+    c(-180, -5.6, -5.6, -180, -180),
+    c(-90, -90, 90, 90, -90)
+  ))
+)
+
+# Top boundary (Northern cutoff)
+mask_polygon_top <- st_polygon(
+  list(cbind(
+    c(-180, 2, 2, -180, -180),
+    c(43, 43, 90, 90, 43)
+  ))
+)
+
+# Bottom boundary (Southern cutoff, excluding sub-Saharan Africa)
+mask_polygon_down <- st_polygon(
+  list(cbind(
+    c(32, 180, 180, 32, 32),
+    c(-90, -90, 31, 31, -90)
+  ))
+)
+
+# Levantine basin (Eastern Mediterranean)
+mask_polygon_levantine <- st_polygon(
+  list(cbind(
+    c(27, 180, 180, 27, 27),
+    c(-90, -90, 40, 40, -90)
+  ))
+)
+
+# Convert to sf objects with CRS
+convert_mask_to_sf <- function(poly) {
+  poly_sf <- st_sfc(poly)
+  st_crs(poly_sf) <- 4326
+  st_as_sf(poly_sf)
+}
+
+mask_polygon_left <- convert_mask_to_sf(mask_polygon_left)
+mask_polygon_top <- convert_mask_to_sf(mask_polygon_top)
+mask_polygon_down <- convert_mask_to_sf(mask_polygon_down)
+mask_polygon_levantine <- convert_mask_to_sf(mask_polygon_levantine)
+```
+
+## Rasterize and Combine Masks
+
+```{r rasterize-masks}
+# Rasterize individual mask polygons
+r1 <- rasterize(mask_polygon_left, rast)
+r2 <- rasterize(mask_polygon_top, rast)
+r3 <- rasterize(mask_polygon_down, rast)
+r4 <- rasterize(mask_polygon_levantine, rast)
+
+# Breeding mask: exclude all three boundaries
+final_mask <- overlay(r, r1, r2, r3, fun = function(x, y, z, t) {
+  ifelse(x != 0 | y != 0 | z != 0 | t != 0, 0, 1)
+})
+proj4string(final_mask) <- crs_object
+
+# Non-breeding mask for Western populations (West Africa pelagic)
+r_mask_gen <- overlay(r, r3, fun = function(x, y) {
+  ifelse(x != 0 | y != 0, 0, 1)
+})
+proj4string(r_mask_gen) <- crs_object
+
+# Levantine mask (Central/Eastern populations)
+s <- stack(r, r1, r2, r3, r4)
+r_mask_pyel <- calc(s, fun = function(x) {
+  ifelse(any(x != 0), 0, 1)
+})
+proj4string(r_mask_pyel) <- crs_object
+
+# Visualize masks
+par(mfrow = c(2, 2), mar = c(3, 3, 2, 1))
+plot(final_mask, main = "Breeding Mask", cex.main = 1.2)
+plot(r_mask_gen, main = "Non-breeding Mask (Western)", cex.main = 1.2)
+plot(r_mask_pyel, main = "Levantine Mask", cex.main = 1.2)
+par(mfrow = c(1, 1))
+```
+
+## Create Inverted Masks for Sampling
+
+```{r invert-masks}
+# Invert masks: 0 → NA, 1 → 1 (for sampling compatibility)
+mask_inv_1 <- final_mask
+mask_inv_1[final_mask == 0] <- NA
+mask_inv_1[is.na(final_mask)] <- 0
+
+mask_inv_2 <- r_mask_gen
+mask_inv_2[r_mask_gen == 0] <- NA
+mask_inv_2[is.na(r_mask_gen)] <- 0
+```
+
+---
+
+# Population and Group Sizes
+
+## Define Population-Level Data
+
+```{r pop-sizes}
+pop_sizes <- as.data.frame(matrix(
+  c(
+    c('Ibiza', 'Mallorca', 'Minorca', 'France', 
+      'Sardinia', 'Malta', 'Croatia', 'Greece'),
+    c(530*2, 900*2, 300*2, 585*2, 
+      11050*2, 1685*2, 425*2, 13000*2),
+    c('PUFMAU', 'PUFMAU', 'PUFYEL', 'PUFYEL', 
+      'PUFYEL', 'PUFYEL', 'PUFYEL', 'PUFYEL')
+  ),
+  nrow = 8, ncol = 3
+))
+
+pop_sizes <- pop_sizes %>%
+  rename(Population = V1, pop_size = V2, Sp = V3) %>%
+  mutate(pop_size = as.numeric(pop_size)) %>%
+  group_by(Sp) %>%
+  mutate(w_pop = pop_size / sum(pop_size)) %>%
+  ungroup()
+
+knitr::kable(pop_sizes, caption = "Population sizes and weights (w_pop) by species")
+```
+
+## Define Geographic Group Data
+
+```{r group-sizes}
+group_sizes <- as.data.frame(matrix(
+  c(
+    c('Ibiza', 'Mallorca', 'Minorca', 'France', 
+      'Sardinia', 'Malta', 'Croatia', 'Greece'),
+    c(530*2, 900*2, 300*2, 585*2, 
+      11050*2, 1685*2, 425*2, 13000*2),
+    c('WesternMost', 'WesternMost', 'WesternMost', 'Central-West',
+      'Central-West', 'Central-East', 'Central-East', 'EasternMost')
+  ),
+  nrow = 8, ncol = 3
+))
+
+group_sizes <- group_sizes %>%
+  rename(Population = V1, pop_size = V2, Group = V3) %>%
+  mutate(pop_size = as.numeric(pop_size)) %>%
+  group_by(Group) %>%
+  mutate(w_group = pop_size / sum(pop_size)) %>%
+  ungroup()
+
+knitr::kable(group_sizes, caption = "Population sizes and weights (w_group) by geographic group")
+```
+
+## Define Species-Level Data
+
+```{r sp-sizes}
+sp_sizes <- as.data.frame(matrix(
+  c(
+    c('PUFMAU', 'PUFYEL'),
+    c(3000*2, 27310*2),
+    c('Supra-taxa', 'Supra-taxa')
+  ),
+  nrow = 2, ncol = 3
+))
+
+sp_sizes <- sp_sizes %>%
+  rename(Sp = V1, sp_size = V2) %>%
+  mutate(
+    sp_size = as.numeric(sp_size),
+    w_sp = sp_size / sum(sp_size)
+  )
+
+knitr::kable(sp_sizes, caption = "Species sizes and weights (w_sp)")
+```
+
+---
+
+# Mask Selection Function
+
+## Dynamic Mask Selection
+
+This function selects the appropriate spatial mask based on breeding/non-breeding period and population group:
+
+```{r get-mask-function}
+get_mask <- function(gr, breeding = TRUE) {
+  # Breeding: use breeding mask
+  if (breeding) return(mask_inv_1)
+  
+  # Non-breeding: Western populations use West Africa pelagic mask
+  if (gr == "WesternMost" & !breeding) return(mask_inv_2)
+  
+  # Non-breeding: Central/Eastern populations use Mediterranean breeding mask
+  if (gr != "WesternMost" & !breeding) return(mask_inv_1)
+}
+```
+
+---
+
+# KDE-Weighted Sampling Functions
+
+## Kernel Density Estimation Sampling
+
+This function generates weighted pseudo-absence points by:
+
+1. Converting coordinates to UTM
+2. Computing 2D kernel density estimate from trip observations
+3. Applying spatial mask
+4. Sampling points weighted by KDE probability
+5. Converting back to geographic coordinates
+
+```{r kde-function}
+sample_kde_weighted <- function(df_coords, n = 60, mask_raster = NULL,
+                                utm_zone = 31, crs_longlat = 4326) {
+  
+  # --------------------------------------------------
+  # 1. Coordenadas → sf → UTM
+  # --------------------------------------------------
+  crs_utm <- paste0(
+    "+proj=utm +zone=", utm_zone, " +datum=WGS84 +units=m +no_defs"
+  )
+  
+  pts_sf <- st_as_sf(df_coords, coords = c("Lon", "Lat"), crs = crs_longlat) |> 
+    st_transform(crs_utm)
+  
+  sp_pts <- as(pts_sf, "Spatial")
+  sp_pts$id <- factor(1)
+  
+  # --------------------------------------------------
+  # 2. KDE (kernelUD returns estUDm)
+  # --------------------------------------------------
+  ud <- try(kernelUD(sp_pts[, "id"], h = "href", grid = 200), silent = TRUE)
+  if (inherits(ud, "try-error")) return(NULL)
+  
+  ud1 <- ud[[1]]  # extract single UD
+  r_ud <- raster(ud1)  # KDE raster in UTM
+  
+  # --------------------------------------------------
+  # 3. Project and adjust mask
+  # --------------------------------------------------
+  if (!is.null(mask_raster)) {
+    mask_utm <- projectRaster(mask_raster, r_ud, method = "ngb")
+    mask_utm <- resample(mask_utm, r_ud, method = "ngb")
+    r_ud <- mask(r_ud, mask_utm, maskvalue = NA)
+  }
+  
+  # --------------------------------------------------
+  # 4. Raster → im (spatstat)
+  # --------------------------------------------------
+  m <- as.matrix(r_ud)
+  m <- m[nrow(m):1, ]  # flip rows
+  e <- extent(r_ud)
+  
+  im_ud <- im(
+    m,
+    xcol = seq(e@xmin, e@xmax, length.out = ncol(m)),
+    yrow = seq(e@ymin, e@ymax, length.out = nrow(m)),
+    unitname = "m"
+  )
+  
+  # --------------------------------------------------
+  # 5. Weighted point sampling
+  # --------------------------------------------------
+  sim_ppp <- try(rpoint(n, im_ud), silent = TRUE)
+  if (inherits(sim_ppp, "try-error")) return(NULL)
+  
+  sim_df <- as.data.frame(sim_ppp)
+  
+  # --------------------------------------------------
+  # 6. Convert back to lon/lat
+  # --------------------------------------------------
+  sim_sf <- st_as_sf(sim_df, coords = c("x", "y"), crs = crs_utm) |>
+    st_transform(crs_longlat)
+  
+  data.frame(
+    Longitude = st_coordinates(sim_sf)[, 1],
+    Latitude = st_coordinates(sim_sf)[, 2]
+  )
+}
+```
+
+## Thinning Function
+
+```{r thinning-function}
+thinning_weighted <- function(df, target_n) {
+  if (nrow(df) <= target_n) return(df)
+  df |> slice_sample(n = target_n)
+}
+```
+
+---
+
+# Generate Presence Data
+
+## Base Presence Points from KDE Sampling
+
+```{r generate-presence-points}
+setwd('C:/Users/mario/OneDrive - Universitat de Barcelona/Escritorio')
+
+desired_n <- 60
+pres_list <- list()
+
+for (p in c("breeding", "non-breeding")) {
+  
+  # Filter by period
+  df_month <- trips |> filter(period == p)
+  
+  # Iterate over unique trips within period
+  for (trip in unique(df_month$geo_trip)) {
+    print(glue::glue("Processing: {p} - {trip}"))
+    
+    trip_df <- df_month |> filter(geo_trip == trip)
+    
+    # Skip trips with insufficient observations
+    if (nrow(trip_df) < desired_n) next
+    
+    # Get group and select appropriate mask
+    gr <- unique(trip_df$Group)
+    mask_use <- get_mask(gr, p == "breeding")
+    
+    # Sample points from KDE
+    pts <- sample_kde_weighted(
+      trip_df |> dplyr::select(Lon, Lat),
+      n = desired_n,
+      mask_raster = mask_use
+    )
+    
+    # Add metadata
+    pres_list[[length(pres_list) + 1]] <-
+      pts |> mutate(
+        geo_trip = trip,
+        Population = unique(trip_df$Population),
+        Group = gr,
+        Sp = unique(trip_df$Sp),
+        period = p
+      )
+  }
+}
+
+pres_df <- bind_rows(pres_list)
+
+cat("Total presence points generated:", nrow(pres_df), "\n")
+cat("Trips represented:", n_distinct(pres_df$geo_trip), "\n")
+```
+
+---
+
+# Hierarchical Weighting and Thinning
+
+## Level 1: Population-Level Weighting (`w_pop`)
+
+Ensure representation of each population is proportional to its size **within each species**:
+
+```{r thinning-population}
+taxa_df <- pres_df %>%
+  # Join population-level weights
+  left_join(
+    pop_sizes %>% dplyr::select(Population, w_pop),
+    by = "Population"
+  ) %>%
+  # Group by period, species, and population to apply weights uniquely
+  group_by(period, Sp, Population) %>%
+  group_modify(~ {
+    # Calculate target sample size based on population weight
+    target <- ceiling(nrow(.x) * unique(.x$w_pop))
+    thinning_weighted(.x, target)
+  }) %>%
+  ungroup()
+
+cat("After population-level thinning:", nrow(taxa_df), "points\n")
+```
+
+## Level 2: Geographic Group Weighting (`w_group`)
+
+Ensure representation of each geographic group is proportional to its population size:
+
+```{r thinning-group}
+group_df <- pres_df %>%
+  # Join group-level weights
+  left_join(
+    group_sizes %>% dplyr::select(Population, Group, w_group),
+    by = c("Population", "Group")
+  ) %>%
+  # Group by period, geographic group, and population
+  group_by(period, Group, Population) %>%
+  group_modify(~ {
+    # Calculate target sample size based on group weight
+    target <- ceiling(nrow(.x) * unique(.x$w_group))
+    thinning_weighted(.x, target)
+  }) %>%
+  ungroup()
+
+cat("After group-level thinning:", nrow(group_df), "points\n")
+```
+
+## Level 3: Species-Level Weighting (`w_sp`)
+
+Balance representation between the two puffin species proportional to their abundance:
+
+```{r thinning-species}
+suprataxa_df <- taxa_df %>%
+  # Join species-level weights
+  left_join(
+    sp_sizes %>% dplyr::select(Sp, w_sp),
+    by = "Sp"
+  ) %>%
+  # Group by period and species
+  group_by(period, Sp) %>%
+  group_modify(~ {
+    # Calculate target sample size based on species weight
+    target <- ceiling(nrow(.x) * unique(.x$w_sp))
+    thinning_weighted(.x, target)
+  }) %>%
+  ungroup()
+
+cat("After species-level thinning:", nrow(suprataxa_df), "points\n")
+```
+
+---
+
+# Summary Statistics
+
+```{r summary-stats}
+cat("=== FINAL DATASET SUMMARIES ===\n\n")
+
+cat("1. POPULATION LEVEL (taxa_df):\n")
+print(taxa_df %>%
+  group_by(period, Sp) %>%
+  summarize(n_points = n(), .groups = "drop"))
+
+cat("\n2. GROUP LEVEL (group_df):\n")
+print(group_df %>%
+  group_by(period, Group) %>%
+  summarize(n_points = n(), .groups = "drop"))
+
+cat("\n3. SPECIES LEVEL (suprataxa_df):\n")
+print(suprataxa_df %>%
+  group_by(period, Sp) %>%
+  summarize(n_points = n(), .groups = "drop"))
+```
+
+---
+
+# Export Results
+
+## Prepare and Save Datasets
+
+```{r export-data}
+setwd("C:/Users/mario/OneDrive - Universitat de Barcelona/Escritorio/Habitat_modelling/month_positions/presences")
+
+# Population-level presence data
+pres_df_export <- pres_df %>%
+  dplyr::select(Longitude, Latitude, geo_trip, Population, period)
+
+saveRDS(pres_df_export,
+        file.path("pres_by_population_thinned.RDS"))
+
+cat("✓ Saved: pres_by_population_thinned.RDS\n")
+
+# Geographic group-level data
+group_df_export <- group_df %>%
+  dplyr::select(Longitude, Latitude, geo_trip, Group, period)
+
+saveRDS(group_df_export,
+        file.path("pres_by_suprapopulation_thinned.RDS"))
+
+cat("✓ Saved: pres_by_suprapopulation_thinned.RDS\n")
+
+# Species-level data
+taxa_df_export <- taxa_df %>%
+  dplyr::select(Longitude, Latitude, geo_trip, Sp, period)
+
+saveRDS(taxa_df_export,
+        file.path("pres_by_sp_thinned.RDS"))
+
+cat("✓ Saved: pres_by_sp_thinned.RDS\n")
+
+# Supra-taxa (final) data
+suprataxa_df_export <- suprataxa_df %>%
+  dplyr::select(Longitude, Latitude, geo_trip, Sp, period)
+
+saveRDS(suprataxa_df_export,
+        file.path("pres_by_suprataxa_thinned.RDS"))
+
+cat("✓ Saved: pres_by_suprataxa_thinned.RDS\n")
+
+cat("\n=== ALL EXPORTS COMPLETE ===\n")
+```
+
+---
+
+# Session Information
+
+```{r session-info}
+sessionInfo()
+```
