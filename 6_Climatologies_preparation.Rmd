@@ -451,18 +451,6 @@ print(summary(stack_final))
 
 ---
 
-# Summary and Next Steps
-
-## Processing Summary
-
-This script has:
-
-✅ **Processed daily NetCDF data** across 12+ environmental variables  
-✅ **Extracted period-specific climatologies** for each tracked individual  
-✅ **Computed spatial statistics** (mean, standard deviation)  
-✅ **Generated gradient layers** for habitat heterogeneity assessment  
-✅ **Created standardized predictor matrices** for ENM training  
-
 ## Output Files
 
 All climatology layers are saved in:
@@ -471,14 +459,6 @@ C:/Users/mario/OneDrive - Universitat de Barcelona/Escritorio/Habitat_modelling/
 ```
 
 **File format:** GeoTIFF (2 bands per variable: mean + temporal SD)
-
-## Next Steps
-
-1. Load `stack_final` into ENM training workflows
-2. Apply variable selection (e.g., VIF, correlation analysis)
-3. Standardize predictors (center/scale) if using distance-based methods
-4. Partition data into training/testing sets
-5. Fit species distribution models
 
 ---
 
