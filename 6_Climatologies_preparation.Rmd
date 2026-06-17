@@ -29,10 +29,11 @@ knitr::opts_chunk$set(
 This analysis prepares environmental climatology layers as predictors for Environmental Niche Models (ENM) by:
 
 1. **Processing daily NetCDF grids** (2001-2024) from oceanographic and meteorological data
-2. **Extracting period-specific climatologies** aligned with individual bird tracking data
+2. **Extracting period-specific climatologies** aligned with our tracking data
 3. **Computing spatial and temporal statistics** (mean and standard deviation)
 4. **Generating gradient layers** for selected variables (spatial heterogeneity)
-5. **Creating individual-level predictor matrices** for ENM training
+5. **Averaging individual-level layers into single predictors to train ENMs
+
 
 **Key variables processed:**
 - Chlorophyll-a (CHLa), gradient (CHLag)
