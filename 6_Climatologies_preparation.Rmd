@@ -1,6 +1,6 @@
 ---
 title: "Environmental Climatologies Preparation for ENM"
-subtitle: "Monthly climatology processing from daily grids (2001-2024)"
+subtitle: "Monthly climatology processing from daily grids (2001-2024) - Breeding vs Non-Breeding"
 author: "Charlotte Lambert & Mario Gómez Álvarez"
 date: "`r Sys.Date()`"
 output:
@@ -29,11 +29,11 @@ knitr::opts_chunk$set(
 This analysis prepares environmental climatology layers as predictors for Environmental Niche Models (ENM) by:
 
 1. **Processing daily NetCDF grids** (2001-2024) from oceanographic and meteorological data
-2. **Extracting period-specific climatologies** aligned with our tracking data
-3. **Computing spatial and temporal statistics** (mean and standard deviation)
-4. **Generating gradient layers** for selected variables (spatial heterogeneity)
-5. **Averaging individual-level layers into single predictors to train ENMs
-
+2. **Separating period-specific climatologies** for breeding and non-breeding seasons
+3. **Extracting climatologies aligned with individual bird tracking data** for each period
+4. **Computing spatial and temporal statistics** (mean and standard deviation)
+5. **Generating gradient layers** for selected variables (spatial heterogeneity)
+6. **Creating individual-level predictor matrices** for ENM training (separate by season)
 
 **Key variables processed:**
 - Chlorophyll-a (CHLa), gradient (CHLag)
@@ -68,7 +68,7 @@ library(grec)           # Gradient computation
 Sys.setlocale("LC_TIME", "English")
 
 # Set working directory
-wd <- ''
+wd <- 'C:/Users/mario/'
 setwd(wd)
 
 # Define utility function
@@ -108,7 +108,7 @@ Load trip data and create period-specific date ranges:
 ```{r load-trips}
 # Load classified trip data
 trips_all <- read_csv(
-  "all_trips_classified.csv"
+  "OneDrive - Universitat de Barcelona/Escritorio/github puffinus/all_trips_classified.csv"
 )
 
 # Separate by breeding/non-breeding
@@ -122,32 +122,42 @@ cat("Breeding trips:", n_distinct(trips_b$geo_trip), "\n")
 cat("Non-breeding trips:", n_distinct(trips_nb$geo_trip), "\n")
 ```
 
-## Define Temporal Periods per Trip
+## Define Temporal Periods per Trip (Separate by Season)
 
 ```{r define-periods}
-# Extract date ranges for each trip
-periods <- bind_rows(
-  trips_nb %>%
-    group_by(geo_trip) %>%
-    summarise(
-      first_date = min(as.Date(paste0(year_dep, "-", date_month))),
-      last_date = max(as.Date(paste0(year_dep, "-", date_month))),
-      period_type = "non-breeding",
-      .groups = "drop"
-    ),
-  trips_b %>%
-    group_by(geo_trip) %>%
-    summarise(
-      first_date = min(as.Date(paste0(year_dep, "-", date_month))),
-      last_date = max(as.Date(paste0(year_dep, "-", date_month))),
-      period_type = "breeding",
-      .groups = "drop"
-    )
+# Extract date ranges for breeding trips
+periods_breeding <- trips_b %>%
+  group_by(geo_trip) %>%
+  summarise(
+    first_date = min(as.Date(paste0(year_dep, "-", date_month))),
+    last_date = max(as.Date(paste0(year_dep, "-", date_month))),
+    period_type = "breeding",
+    .groups = "drop"
+  )
+
+# Extract date ranges for non-breeding trips
+periods_nonbreeding <- trips_nb %>%
+  group_by(geo_trip) %>%
+  summarise(
+    first_date = min(as.Date(paste0(year_dep, "-", date_month))),
+    last_date = max(as.Date(paste0(year_dep, "-", date_month))),
+    period_type = "non-breeding",
+    .groups = "drop"
+  )
+
+# Combine for reference
+periods <- bind_rows(periods_breeding, periods_nonbreeding)
+
+cat("\n=== BREEDING PERIODS ===\n")
+knitr::kable(
+  head(periods_breeding, 10),
+  caption = "Sample of breeding temporal periods"
 )
 
+cat("\n=== NON-BREEDING PERIODS ===\n")
 knitr::kable(
-  head(periods, 10),
-  caption = "Sample of temporal periods extracted from tracking data"
+  head(periods_nonbreeding, 10),
+  caption = "Sample of non-breeding temporal periods"
 )
 ```
 
@@ -303,36 +313,38 @@ process_habitat_vars <- function(v_idx, v_short, v_long, is_gradient,
 
 ---
 
-# Main Processing Loop
+# Main Processing Loop: Breeding Climatologies
 
-## Execute Variable Processing
+## Execute Variable Processing for Breeding Season
 
-Process all environmental variables for all tracked trips:
+Process all environmental variables for breeding trips:
 
-```{r process-loop}
-# Output directory
-path_out <- "breeding_climatology"
+```{r process-loop-breeding}
+# Output directory for breeding
+path_out_breeding <- "C:/Users/mario/OneDrive - Universitat de Barcelona/Escritorio/Habitat_modelling/vars/breeding_climatology"
 
-if (!dir.exists(path_out)) {
-  dir.create(path_out, recursive = TRUE)
+if (!dir.exists(path_out_breeding)) {
+  dir.create(path_out_breeding, recursive = TRUE)
 }
+
+cli::cli_h1("PROCESSING BREEDING SEASON CLIMATOLOGIES")
 
 # Process each variable
 for (i in 1:nrow(vars_list)) {
   
   v <- vars_list[i, ]
-  cli::cli_h1("PROCESSING VARIABLE: {v$var}")
+  cli::cli_h2("VARIABLE: {v$var}")
   cli::cli_alert("Description: {v$description}")
   
   # List to store individual results
   all_indiv_layers <- list()
   
-  # Process each tracked trip
-  for (id in periods$geo_trip) {
-    cli::cli_alert_info("Computing for trip: {id}")
+  # Process each breeding trip
+  for (id in periods_breeding$geo_trip) {
+    cli::cli_alert_info("Computing for breeding trip: {id}")
     
     # Get period for current trip
-    track <- periods %>% filter(geo_trip == id)
+    track <- periods_breeding %>% filter(geo_trip == id)
     
     # Process variable for this individual
     res_indiv <- process_habitat_vars(
@@ -352,7 +364,7 @@ for (i in 1:nrow(vars_list)) {
   }
   
   # ---------------------------------------------------------------
-  # FINAL AGGREGATION
+  # FINAL AGGREGATION FOR BREEDING
   # ---------------------------------------------------------------
   if (length(all_indiv_layers) > 0) {
     # Stack all individual results
@@ -374,14 +386,103 @@ for (i in 1:nrow(vars_list)) {
     names(res_raster) <- c("mean_global", "sd_temporal_mean")
     
     # Save output
-    output_file <- file.path(path_out, paste0(v$var, "_b_complete.tif"))
+    output_file <- file.path(path_out_breeding, paste0(v$var, "_breeding_complete.tif"))
     writeRaster(res_raster, output_file, overwrite = TRUE)
     
     cli::cli_alert_success("Saved: {basename(output_file)}")
+  } else {
+    cli::cli_alert_warning("No valid data for {v$var} in breeding period")
   }
 }
 
-cli::cli_h2("PROCESSING COMPLETE!")
+cli::cli_h2("BREEDING CLIMATOLOGIES PROCESSING COMPLETE!")
+```
+
+---
+
+# Main Processing Loop: Non-Breeding Climatologies
+
+## Execute Variable Processing for Non-Breeding Season
+
+Process all environmental variables for non-breeding trips:
+
+```{r process-loop-nonbreeding}
+# Output directory for non-breeding
+path_out_nonbreeding <- "C:/Users/mario/OneDrive - Universitat de Barcelona/Escritorio/Habitat_modelling/vars/non_breeding_climatology"
+
+if (!dir.exists(path_out_nonbreeding)) {
+  dir.create(path_out_nonbreeding, recursive = TRUE)
+}
+
+cli::cli_h1("PROCESSING NON-BREEDING SEASON CLIMATOLOGIES")
+
+# Process each variable
+for (i in 1:nrow(vars_list)) {
+  
+  v <- vars_list[i, ]
+  cli::cli_h2("VARIABLE: {v$var}")
+  cli::cli_alert("Description: {v$description}")
+  
+  # List to store individual results
+  all_indiv_layers <- list()
+  
+  # Process each non-breeding trip
+  for (id in periods_nonbreeding$geo_trip) {
+    cli::cli_alert_info("Computing for non-breeding trip: {id}")
+    
+    # Get period for current trip
+    track <- periods_nonbreeding %>% filter(geo_trip == id)
+    
+    # Process variable for this individual
+    res_indiv <- process_habitat_vars(
+      v_idx = v$archivo_idx,
+      v_short = v$var_short,
+      v_long = v$var,
+      is_gradient = v$gradient,
+      track_period = track,
+      template = template_raster
+    )
+    
+    if (!is.null(res_indiv)) {
+      all_indiv_layers[[id]] <- res_indiv
+    }
+    
+    gc()  # Memory cleanup
+  }
+  
+  # ---------------------------------------------------------------
+  # FINAL AGGREGATION FOR NON-BREEDING
+  # ---------------------------------------------------------------
+  if (length(all_indiv_layers) > 0) {
+    # Stack all individual results
+    stack_final <- rast(all_indiv_layers)
+    
+    # Separate mean and sd layers
+    idx_means <- seq(1, nlyr(stack_final), by = 2)
+    idx_sds <- seq(2, nlyr(stack_final), by = 2)
+    
+    # 1. Global mean climatology across all trips
+    final_mean <- mean(stack_final[[idx_means]], na.rm = TRUE)
+    
+    # 2. Mean temporal variability
+    # (indicates how dynamic conditions are at each pixel)
+    final_sd_temporal <- mean(stack_final[[idx_sds]], na.rm = TRUE)
+    
+    # Prepare output raster
+    res_raster <- c(final_mean, final_sd_temporal)
+    names(res_raster) <- c("mean_global", "sd_temporal_mean")
+    
+    # Save output
+    output_file <- file.path(path_out_nonbreeding, paste0(v$var, "_non_breeding_complete.tif"))
+    writeRaster(res_raster, output_file, overwrite = TRUE)
+    
+    cli::cli_alert_success("Saved: {basename(output_file)}")
+  } else {
+    cli::cli_alert_warning("No valid data for {v$var} in non-breeding period")
+  }
+}
+
+cli::cli_h2("NON-BREEDING CLIMATOLOGIES PROCESSING COMPLETE!")
 ```
 
 ---
@@ -391,15 +492,165 @@ cli::cli_h2("PROCESSING COMPLETE!")
 ## Verify Output Files
 
 ```{r validate-output}
-# List generated climatology files
-output_files <- list.files(
-  "breeding_climatology",
+# List generated breeding climatology files
+breeding_files <- list.files(
+  "C:/Users/mario/OneDrive - Universitat de Barcelona/Escritorio/Habitat_modelling/vars/breeding_climatology",
   full.names = TRUE
 )
 
-cat("Generated", length(output_files), "climatology files:\n")
-print(basename(output_files))
+# List generated non-breeding climatology files
+nonbreeding_files <- list.files(
+  "C:/Users/mario/OneDrive - Universitat de Barcelona/Escritorio/Habitat_modelling/vars/non_breeding_climatology",
+  full.names = TRUE
+)
+
+cat("=== BREEDING CLIMATOLOGIES ===\n")
+cat("Generated", length(breeding_files), "files:\n")
+print(basename(breeding_files))
+
+cat("\n=== NON-BREEDING CLIMATOLOGIES ===\n")
+cat("Generated", length(nonbreeding_files), "files:\n")
+print(basename(nonbreeding_files))
 ```
+
+## Stack Variables by Season
+
+Create separate stacks for breeding and non-breeding predictors:
+
+```{r stack-variables-by-season}
+# ===== BREEDING STACK =====
+stack_breeding <- rast(breeding_files)
+
+cat("\n=== BREEDING PREDICTOR STACK ===\n")
+cat("Layers:", nlyr(stack_breeding), "\n")
+cat("Extent:", paste(ext(stack_breeding)), "\n")
+cat("Resolution:", res(stack_breeding)[1], "degrees\n")
+
+# ===== NON-BREEDING STACK =====
+stack_nonbreeding <- rast(nonbreeding_files)
+
+cat("\n=== NON-BREEDING PREDICTOR STACK ===\n")
+cat("Layers:", nlyr(stack_nonbreeding), "\n")
+cat("Extent:", paste(ext(stack_nonbreeding)), "\n")
+cat("Resolution:", res(stack_nonbreeding)[1], "degrees\n")
+
+# Verify geometric compatibility within each season
+cli::cli_h2("Verifying geometric compatibility...")
+
+tryCatch(
+  compareGeom(stack_breeding),
+  error = function(e) {
+    cli::cli_alert_warning("Breeding geometry mismatch detected:")
+    print(e)
+  },
+  success = function() {
+    cli::cli_alert_success("Breeding stack geometry OK")
+  }
+)
+
+tryCatch(
+  compareGeom(stack_nonbreeding),
+  error = function(e) {
+    cli::cli_alert_warning("Non-breeding geometry mismatch detected:")
+    print(e)
+  },
+  success = function() {
+    cli::cli_alert_success("Non-breeding stack geometry OK")
+  }
+)
+```
+
+## Visualize Predictor Layers by Season
+
+```{r visualize-stacks}
+# Plot breeding climatology layers
+cli::cli_h2("BREEDING CLIMATOLOGIES VISUALIZATION")
+plot(stack_breeding, maxcell = 100000, main = "Breeding Season")
+
+# Plot non-breeding climatology layers
+cli::cli_h2("NON-BREEDING CLIMATOLOGIES VISUALIZATION")
+plot(stack_nonbreeding, maxcell = 100000, main = "Non-Breeding Season")
+
+# Summary statistics
+cat("\n=== BREEDING STACK SUMMARY ===\n")
+print(summary(stack_breeding))
+
+cat("\n=== NON-BREEDING STACK SUMMARY ===\n")
+print(summary(stack_nonbreeding))
+```
+
+---
+
+# Comparative Analysis
+
+## Compare Breeding vs Non-Breeding Conditions
+
+Visualize differences between the two seasons for selected variables:
+
+```{r compare-seasons}
+# Extract SST layers as example
+sst_breeding <- stack_breeding[[grep("SST", names(stack_breeding), value = TRUE)]]
+sst_nonbreeding <- stack_nonbreeding[[grep("SST", names(stack_nonbreeding), value = TRUE)]]
+
+# Calculate difference (non-breeding minus breeding)
+sst_diff <- sst_nonbreeding - sst_breeding
+
+# Visualize comparison
+par(mfrow = c(1, 3), mar = c(3, 3, 2, 1))
+plot(sst_breeding[[1]], main = "SST - Breeding Mean", cex.main = 1.2)
+plot(sst_nonbreeding[[1]], main = "SST - Non-Breeding Mean", cex.main = 1.2)
+plot(sst_diff[[1]], main = "SST Difference (NB - B)", cex.main = 1.2)
+par(mfrow = c(1, 1))
+
+cat("\n=== SEASONAL DIFFERENCE STATISTICS ===\n")
+cat("SST mean difference (non-breeding - breeding):\n")
+print(summary(sst_diff))
+```
+
+---
+
+# Summary and Next Steps
+
+## Processing Summary
+
+This script has:
+
+✅ **Processed daily NetCDF data** across 12+ environmental variables  
+✅ **Separated breeding and non-breeding climatologies** using actual tracking dates  
+✅ **Extracted period-specific climatologies** for each tracked individual  
+✅ **Computed spatial statistics** (mean, standard deviation)  
+✅ **Generated gradient layers** for habitat heterogeneity assessment  
+✅ **Created standardized predictor matrices** for each season separately  
+
+## Output Directory Structure
+
+```
+Habitat_modelling/vars/
+├── breeding_climatology/
+│   ├── CHLa_breeding_complete.tif
+│   ├── CHLag_breeding_complete.tif
+│   ├── NPP_breeding_complete.tif
+│   └── ... (12 total variables)
+│
+└── non_breeding_climatology/
+    ├── CHLa_non_breeding_complete.tif
+    ├── CHLag_non_breeding_complete.tif
+    ├── NPP_non_breeding_complete.tif
+    └── ... (12 total variables)
+```
+
+**File format:** GeoTIFF (2 bands per variable: mean + temporal SD)
+
+## Next Steps
+
+1. Load season-specific stacks into ENM training workflows
+2. Apply variable selection separately for each season (e.g., VIF, correlation analysis)
+3. Standardize predictors (center/scale) if using distance-based methods
+4. Partition data by season into training/testing sets
+5. Fit season-specific species distribution models
+6. Compare ENM predictions between breeding and non-breeding periods
+
+---
 
 # Session Information
 
