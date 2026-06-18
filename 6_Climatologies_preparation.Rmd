@@ -68,7 +68,7 @@ library(grec)           # Gradient computation
 Sys.setlocale("LC_TIME", "English")
 
 # Set working directory
-wd <- 'C:/Users/mario/'
+wd <- ''
 setwd(wd)
 
 # Define utility function
@@ -108,7 +108,7 @@ Load trip data and create period-specific date ranges:
 ```{r load-trips}
 # Load classified trip data
 trips_all <- read_csv(
-  "OneDrive - Universitat de Barcelona/Escritorio/github puffinus/all_trips_classified.csv"
+  "all_trips_classified.csv"
 )
 
 # Separate by breeding/non-breeding
@@ -311,7 +311,7 @@ Process all environmental variables for all tracked trips:
 
 ```{r process-loop}
 # Output directory
-path_out <- "C:/Users/mario/OneDrive - Universitat de Barcelona/Escritorio/Habitat_modelling/vars/breeding_climatology"
+path_out <- "breeding_climatology"
 
 if (!dir.exists(path_out)) {
   dir.create(path_out, recursive = TRUE)
@@ -393,74 +393,13 @@ cli::cli_h2("PROCESSING COMPLETE!")
 ```{r validate-output}
 # List generated climatology files
 output_files <- list.files(
-  "C:/Users/mario/OneDrive - Universitat de Barcelona/Escritorio/Habitat_modelling/vars/breeding_climatology",
+  "breeding_climatology",
   full.names = TRUE
 )
 
 cat("Generated", length(output_files), "climatology files:\n")
 print(basename(output_files))
 ```
-
-## Stack All Variables
-
-Create a final stack containing all environmental predictors:
-
-```{r stack-variables}
-# Load all climatology files
-climatology_path <- "C:/Users/mario/OneDrive - Universitat de Barcelona/Escritorio/Habitat_modelling/vars/breeding_climatology"
-vars_climatology <- list.files(climatology_path, pattern = ".tif", full.names = TRUE)
-
-# Load additional external variables if they exist
-external_vars <- list.files(
-  "C:/Users/mario/OneDrive - Universitat de Barcelona/Escritorio/Habitat_modelling/vars",
-  pattern = ".tif",
-  full.names = TRUE
-)
-
-# Combine all variables
-all_var_paths <- c(vars_climatology, external_vars)
-
-# Create final stack
-stack_final <- rast(all_var_paths)
-
-cat("Final predictor stack:\n")
-cat("Layers:", nlyr(stack_final), "\n")
-cat("Extent:", paste(ext(stack_final)), "\n")
-cat("Resolution:", res(stack_final)[1], "degrees\n")
-
-# Verify geometric compatibility
-tryCatch(
-  compareGeom(stack_final),
-  error = function(e) {
-    cli::cli_alert_warning("Geometry mismatch detected:")
-    print(e)
-  }
-)
-```
-
-## Visualize Predictor Layers
-
-```{r visualize-stack}
-# Plot climatology layers
-plot(rast(vars_climatology), maxcell = 100000)
-
-# Summary statistics
-cat("\nPredictor Stack Summary:\n")
-print(summary(stack_final))
-```
-
----
-
-## Output Files
-
-All climatology layers are saved in:
-```
-C:/Users/mario/OneDrive - Universitat de Barcelona/Escritorio/Habitat_modelling/vars/breeding_climatology/
-```
-
-**File format:** GeoTIFF (2 bands per variable: mean + temporal SD)
-
----
 
 # Session Information
 
