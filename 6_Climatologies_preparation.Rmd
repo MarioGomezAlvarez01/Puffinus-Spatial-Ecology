@@ -1,0 +1,586 @@
+---
+title: "Environmental Climatologies Preparation for ENM"
+subtitle: "Monthly climatology processing from daily grids - Breeding vs Non-Breeding"
+author: "Charlotte Lambert & Mario Gómez Álvarez"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    theme: cosmo
+    highlight: tango
+    self_contained: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 12,
+  fig.height = 8,
+  cache = FALSE
+)
+```
+
+# Overview
+
+This analysis prepares environmental climatology layers as predictors for Environmental Niche Models (ENM) by:
+
+1. **Processing daily NetCDF grids** (2001-2024) from oceanographic and meteorological data
+2. **Separating period-specific climatologies** for breeding and non-breeding seasons
+3. **Extracting climatologies aligned with individual bird tracking data** for each period
+4. **Computing spatial and temporal statistics** (mean and standard deviation)
+5. **Generating gradient layers** for selected variables (spatial heterogeneity)
+6. **Creating individual-level predictor matrices** for ENM training (separate by season)
+
+**Key variables processed:**
+- Chlorophyll-a (CHLa), gradient (CHLag). https://doi.org/10.48670/moi-00019 
+- Net Primary Productivity (NPP), gradient (NPPg). https://doi.org/10.48670/moi-00019 
+- Sea Surface Temperature (SST), gradient (SSTg). https://doi.org/10.48670/moi-00024
+- Sea Surface Salinity (SSS), gradient (SSSg). https://doi.org/10.48670/moi-00024
+- Mixed Layer Depth (MLD). https://doi.org/10.48670/moi-00021
+- Sea Surface Height (SSH). https://doi.org/10.48670/moi-00021
+- Wind Speed. https://doi.org/10.48670/moi-00181
+- Wind stress curl (gIUV). https://doi.org/10.48670/moi-00021
+
+---
+
+# Setup and Configuration
+
+## Library Dependencies
+
+```{r libraries}
+library(tidyverse)      
+library(terra)         
+library(sf)             
+library(ncdf4)          
+library(tidyterra)      
+library(cli)           
+library(grec)          
+```
+
+## System Configuration
+
+```{r system-config}
+# Set locale to English for consistent date handling
+Sys.setlocale("LC_TIME", "English")
+
+# Set working directory with raw files
+wd <- ''
+setwd(wd)
+
+# Define utility function
+'%!in%' <- function(x, y) !('%in%'(x, y))
+```
+
+---
+
+# Data Loading
+
+## NetCDF Files and Tracking Data
+
+```{r load-files}
+# Load all NetCDF files matching pattern
+files <- list.files(path = wd, pattern = ".nc")
+cat("Found", length(files), "NetCDF files:\n")
+print(files)
+
+# Define target extent (Mediterranean and adjacent areas)
+target_extent <- ext(-15, 42, 28, 51)
+
+# Create template raster for standardization
+template_raster <- rast(
+  extent = target_extent,
+  resolution = 0.25,
+  crs = "EPSG:4326"
+)
+values(template_raster) <- NA
+
+cat("\nTemplate raster resolution:", res(template_raster)[1], "degrees\n")
+```
+
+## Trip Classification Data
+
+Load trip data and create period-specific date ranges:
+
+```{r load-trips}
+# Load classified trip data
+trips_all <- read_csv("all_trips_classified.csv")
+
+# Separate by breeding/non-breeding
+trips_b <- trips_all %>%
+  filter(period == "breeding")
+
+trips_nb <- trips_all %>%
+  filter(period == "non-breeding")
+
+cat("Breeding trips:", n_distinct(trips_b$geo_trip), "\n")
+cat("Non-breeding trips:", n_distinct(trips_nb$geo_trip), "\n")
+```
+
+## Define Temporal Periods per Trip (Separate by Season)
+
+```{r define-periods}
+# Extract date ranges for breeding trips
+periods_breeding <- trips_b %>%
+  group_by(geo_trip) %>%
+  summarise(
+    first_date = min(as.Date(paste0(year_dep, "-", date_month))),
+    last_date = max(as.Date(paste0(year_dep, "-", date_month))),
+    period_type = "breeding",
+    .groups = "drop"
+  )
+
+# Extract date ranges for non-breeding trips
+periods_nonbreeding <- trips_nb %>%
+  group_by(geo_trip) %>%
+  summarise(
+    first_date = min(as.Date(paste0(year_dep, "-", date_month))),
+    last_date = max(as.Date(paste0(year_dep, "-", date_month))),
+    period_type = "non-breeding",
+    .groups = "drop"
+  )
+
+# Combine for reference
+periods <- bind_rows(periods_breeding, periods_nonbreeding)
+
+cat("\n=== BREEDING PERIODS ===\n")
+knitr::kable(
+  head(periods_breeding, 10),
+  caption = "Sample of breeding temporal periods"
+)
+
+cat("\n=== NON-BREEDING PERIODS ===\n")
+knitr::kable(
+  head(periods_nonbreeding, 10),
+  caption = "Sample of non-breeding temporal periods"
+)
+```
+
+---
+
+# Variable Configuration
+
+## Variable Dictionary
+
+Create a configuration table mapping variable names, NetCDF short names, and processing options:
+
+```{r var-config}
+vars_list <- data.frame(
+  var = c(
+    "CHLa", "CHLag", "NPP", "NPPg", "SST", "SSTg",
+    "SSS", "SSSg", "MLD", "SSH", "Wind", "gIUV"
+  ),
+  var_short = c(
+    "chl", "chl", "nppv", "nppv", "thetao", "thetao",
+    "so", "so", "mlotst", "zos", "wind_speed", "uo"
+  ),
+  archivo_idx = c(1, 1, 1, 1, 3, 3, 3, 3, 2, 2, 5, 4),
+  gradient = c(
+    FALSE, TRUE, FALSE, TRUE, FALSE, TRUE,
+    FALSE, TRUE, FALSE, FALSE, FALSE, FALSE
+  ),
+  description = c(
+    "Chlorophyll-a concentration",
+    "Chlorophyll-a spatial gradient",
+    "Net Primary Productivity",
+    "NPP spatial gradient",
+    "Sea Surface Temperature",
+    "SST spatial gradient",
+    "Sea Surface Salinity",
+    "SSS spatial gradient",
+    "Mixed Layer Depth",
+    "Sea Surface Height",
+    "Wind Speed",
+    "Wind stress curl (magnitude U,V)"
+  )
+)
+
+knitr::kable(vars_list, caption = "Environmental variables configuration")
+```
+
+---
+
+# Core Processing Function
+
+## Habitat Variable Processing
+
+This function handles the complete processing pipeline for each environmental variable:
+
+```{r process-function}
+process_habitat_vars <- function(v_idx, v_short, v_long, is_gradient,
+                                track_period, template) {
+  
+  file_path <- files[v_idx]
+  
+  # ---------------------------------------------------------------
+  # 1. TEMPORAL FILTERING
+  # ---------------------------------------------------------------
+  if (v_long == "gIUV") {
+    # Wind stress curl: compute magnitude from U and V components
+    u_raw <- rast(file_path, subds = "uo")
+    v_raw <- rast(file_path, subds = "vo")
+    
+    # Extract time indices within track period
+    idx <- which(
+      time(u_raw) >= track_period$first_date &
+      time(u_raw) <= track_period$last_date
+    )
+    
+    if (length(idx) == 0) return(NULL)
+    
+    # Compute magnitude: sqrt(U^2 + V^2)
+    r_period <- sqrt(u_raw[[idx]]^2 + v_raw[[idx]]^2)
+  } else {
+    # Standard variable extraction
+    r_raw <- rast(file_path, subds = v_short)
+    
+    idx <- which(
+      time(r_raw) >= track_period$first_date &
+      time(r_raw) <= track_period$last_date
+    )
+    
+    if (length(idx) == 0) return(NULL)
+    
+    r_period <- r_raw[[idx]]
+  }
+  
+  # ---------------------------------------------------------------
+  # 2. SPATIAL ADJUSTMENT
+  # ---------------------------------------------------------------
+  # Aggregate to template resolution if necessary
+  if (res(r_period)[1] < res(template)[1]) {
+    fact <- round(res(template)[1] / res(r_period)[1])
+    r_period <- aggregate(r_period, fact = fact, fun = mean, na.rm = TRUE)
+  }
+  
+  # Crop and resample to template extent
+  r_period <- crop(r_period, ext(template), snap = "out")
+  r_period <- resample(r_period, template, method = "near")
+  
+  # ---------------------------------------------------------------
+  # 3. DEPTH COLLAPSE (for CHLa and NPP)
+  # ---------------------------------------------------------------
+  # These variables have multiple depth layers; average them
+  if (v_idx == 1) {
+    n_depths <- 12  # Number of depth levels
+    n_days <- nlyr(r_period) / n_depths
+    r_period <- tapp(
+      r_period,
+      index = rep(1:n_days, each = n_depths),
+      fun = mean,
+      na.rm = TRUE
+    )
+  }
+  
+  # ---------------------------------------------------------------
+  # 4. GRADIENT COMPUTATION
+  # ---------------------------------------------------------------
+  # For gradient variables, compute spatial heterogeneity
+  if (is_gradient) {
+    r_list <- lapply(1:nlyr(r_period), function(i) {
+      layer_i <- r_period[[i]]
+      
+      # Check if layer has data
+      if (global(layer_i, "notNA")[1, 1] > 0) {
+        grec::getGradients(layer_i)
+      } else {
+        # Return empty layer if no data
+        setValues(template, NA)
+      }
+    })
+    
+    r_period <- rast(r_list)
+  }
+  
+  # ---------------------------------------------------------------
+  # 5. MASKING AND STATISTICS
+  # ---------------------------------------------------------------
+  # Apply template mask (ocean only)
+  r_period <- mask(r_period, template, inverse = TRUE)
+  
+  # Compute mean and standard deviation across time
+  m_i <- mean(r_period, na.rm = TRUE)
+  s_i <- stdev(r_period, na.rm = TRUE)
+  
+  return(c(m_i, s_i))
+}
+```
+
+---
+
+# Main Processing Loop: Breeding Climatologies
+
+## Execute Variable Processing for Breeding Season
+
+Process all environmental variables for breeding trips:
+
+```{r process-loop-breeding}
+# Output directory for breeding
+path_out_breeding <- "breeding_climatology"
+
+if (!dir.exists(path_out_breeding)) {
+  dir.create(path_out_breeding, recursive = TRUE)
+}
+
+cli::cli_h1("PROCESSING BREEDING SEASON CLIMATOLOGIES")
+
+# Process each variable
+for (i in 1:nrow(vars_list)) {
+  
+  v <- vars_list[i, ]
+  cli::cli_h2("VARIABLE: {v$var}")
+  cli::cli_alert("Description: {v$description}")
+  
+  # List to store individual results
+  all_indiv_layers <- list()
+  
+  # Process each breeding trip
+  for (id in periods_breeding$geo_trip) {
+    cli::cli_alert_info("Computing for breeding trip: {id}")
+    
+    # Get period for current trip
+    track <- periods_breeding %>% filter(geo_trip == id)
+    
+    # Process variable for this individual
+    res_indiv <- process_habitat_vars(
+      v_idx = v$archivo_idx,
+      v_short = v$var_short,
+      v_long = v$var,
+      is_gradient = v$gradient,
+      track_period = track,
+      template = template_raster
+    )
+    
+    if (!is.null(res_indiv)) {
+      all_indiv_layers[[id]] <- res_indiv
+    }
+    
+    gc()  # Memory cleanup
+  }
+  
+  # ---------------------------------------------------------------
+  # FINAL AGGREGATION FOR BREEDING
+  # ---------------------------------------------------------------
+  if (length(all_indiv_layers) > 0) {
+    # Stack all individual results
+    stack_final <- rast(all_indiv_layers)
+    
+    # Separate mean and sd layers
+    idx_means <- seq(1, nlyr(stack_final), by = 2)
+    idx_sds <- seq(2, nlyr(stack_final), by = 2)
+    
+    # 1. Global mean climatology across all trips
+    final_mean <- mean(stack_final[[idx_means]], na.rm = TRUE)
+    
+    # 2. Mean temporal variability
+    # (indicates how dynamic conditions are at each pixel)
+    final_sd_temporal <- mean(stack_final[[idx_sds]], na.rm = TRUE)
+    
+    # Prepare output raster
+    res_raster <- c(final_mean, final_sd_temporal)
+    names(res_raster) <- c("mean_global", "sd_temporal_mean")
+    
+    # Save output
+    output_file <- file.path(path_out_breeding, 
+                             paste0(v$var,"_breeding_complete.tif"))
+    writeRaster(res_raster, output_file, overwrite = TRUE)
+    
+    cli::cli_alert_success("Saved: {basename(output_file)}")
+  } else {
+    cli::cli_alert_warning("No valid data for {v$var} in breeding period")
+  }
+}
+
+cli::cli_h2("BREEDING CLIMATOLOGIES PROCESSING COMPLETE!")
+```
+
+---
+
+# Main Processing Loop: Non-Breeding Climatologies
+
+## Execute Variable Processing for Non-Breeding Season
+
+Process all environmental variables for non-breeding trips:
+
+```{r process-loop-nonbreeding}
+# Output directory for non-breeding
+path_out_nonbreeding <- "non_breeding_climatology"
+
+if (!dir.exists(path_out_nonbreeding)) {
+  dir.create(path_out_nonbreeding, recursive = TRUE)
+}
+
+cli::cli_h1("PROCESSING NON-BREEDING SEASON CLIMATOLOGIES")
+
+# Process each variable
+for (i in 1:nrow(vars_list)) {
+  
+  v <- vars_list[i, ]
+  cli::cli_h2("VARIABLE: {v$var}")
+  cli::cli_alert("Description: {v$description}")
+  
+  # List to store individual results
+  all_indiv_layers <- list()
+  
+  # Process each non-breeding trip
+  for (id in periods_nonbreeding$geo_trip) {
+    cli::cli_alert_info("Computing for non-breeding trip: {id}")
+    
+    # Get period for current trip
+    track <- periods_nonbreeding %>% filter(geo_trip == id)
+    
+    # Process variable for this individual
+    res_indiv <- process_habitat_vars(
+      v_idx = v$archivo_idx,
+      v_short = v$var_short,
+      v_long = v$var,
+      is_gradient = v$gradient,
+      track_period = track,
+      template = template_raster
+    )
+    
+    if (!is.null(res_indiv)) {
+      all_indiv_layers[[id]] <- res_indiv
+    }
+    
+    gc()  # Memory cleanup
+  }
+  
+  # ---------------------------------------------------------------
+  # FINAL AGGREGATION FOR NON-BREEDING
+  # ---------------------------------------------------------------
+  if (length(all_indiv_layers) > 0) {
+    # Stack all individual results
+    stack_final <- rast(all_indiv_layers)
+    
+    # Separate mean and sd layers
+    idx_means <- seq(1, nlyr(stack_final), by = 2)
+    idx_sds <- seq(2, nlyr(stack_final), by = 2)
+    
+    # 1. Global mean climatology across all trips
+    final_mean <- mean(stack_final[[idx_means]], na.rm = TRUE)
+    
+    # 2. Mean temporal variability
+    # (indicates how dynamic conditions are at each pixel)
+    final_sd_temporal <- mean(stack_final[[idx_sds]], na.rm = TRUE)
+    
+    # Prepare output raster
+    res_raster <- c(final_mean, final_sd_temporal)
+    names(res_raster) <- c("mean_global", "sd_temporal_mean")
+    
+    # Save output
+    output_file <- file.path(path_out_nonbreeding, 
+                             paste0(v$var, "_non_breeding_complete.tif"))
+    writeRaster(res_raster, output_file, overwrite = TRUE)
+    
+    cli::cli_alert_success("Saved: {basename(output_file)}")
+  } else {
+    cli::cli_alert_warning("No valid data for {v$var} in non-breeding period")
+  }
+}
+
+cli::cli_h2("NON-BREEDING CLIMATOLOGIES PROCESSING COMPLETE!")
+```
+
+---
+
+# Output Validation and Assembly
+
+## Verify Output Files
+
+```{r validate-output}
+# List generated breeding climatology files
+breeding_files <- list.files(
+  "breeding_climatology",
+  full.names = TRUE
+)
+
+# List generated non-breeding climatology files
+nonbreeding_files <- list.files(
+  "non_breeding_climatology",
+  full.names = TRUE
+)
+
+cat("=== BREEDING CLIMATOLOGIES ===\n")
+cat("Generated", length(breeding_files), "files:\n")
+print(basename(breeding_files))
+
+cat("\n=== NON-BREEDING CLIMATOLOGIES ===\n")
+cat("Generated", length(nonbreeding_files), "files:\n")
+print(basename(nonbreeding_files))
+```
+
+## Stack Variables by Season
+
+Create separate stacks for breeding and non-breeding predictors:
+
+```{r stack-variables-by-season}
+# ===== BREEDING STACK =====
+stack_breeding <- rast(breeding_files)
+
+cat("\n=== BREEDING PREDICTOR STACK ===\n")
+cat("Layers:", nlyr(stack_breeding), "\n")
+cat("Extent:", paste(ext(stack_breeding)), "\n")
+cat("Resolution:", res(stack_breeding)[1], "degrees\n")
+
+# ===== NON-BREEDING STACK =====
+stack_nonbreeding <- rast(nonbreeding_files)
+
+cat("\n=== NON-BREEDING PREDICTOR STACK ===\n")
+cat("Layers:", nlyr(stack_nonbreeding), "\n")
+cat("Extent:", paste(ext(stack_nonbreeding)), "\n")
+cat("Resolution:", res(stack_nonbreeding)[1], "degrees\n")
+
+# Verify geometric compatibility within each season
+cli::cli_h2("Verifying geometric compatibility...")
+
+tryCatch(
+  compareGeom(stack_breeding),
+  error = function(e) {
+    cli::cli_alert_warning("Breeding geometry mismatch detected:")
+    print(e)
+  },
+  success = function() {
+    cli::cli_alert_success("Breeding stack geometry OK")
+  }
+)
+
+tryCatch(
+  compareGeom(stack_nonbreeding),
+  error = function(e) {
+    cli::cli_alert_warning("Non-breeding geometry mismatch detected:")
+    print(e)
+  },
+  success = function() {
+    cli::cli_alert_success("Non-breeding stack geometry OK")
+  }
+)
+```
+
+## Visualize Predictor Layers by Season
+
+```{r visualize-stacks}
+# Plot breeding climatology layers
+cli::cli_h2("BREEDING CLIMATOLOGIES VISUALIZATION")
+plot(stack_breeding, maxcell = 100000, main = "Breeding Season")
+
+# Plot non-breeding climatology layers
+cli::cli_h2("NON-BREEDING CLIMATOLOGIES VISUALIZATION")
+plot(stack_nonbreeding, maxcell = 100000, main = "Non-Breeding Season")
+
+# Summary statistics
+cat("\n=== BREEDING STACK SUMMARY ===\n")
+print(summary(stack_breeding))
+
+cat("\n=== NON-BREEDING STACK SUMMARY ===\n")
+print(summary(stack_nonbreeding))
+```
+
+# Session Information
+
+```{r session-info}
+sessionInfo()
+```
