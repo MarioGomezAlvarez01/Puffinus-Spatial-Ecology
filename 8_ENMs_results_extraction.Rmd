@@ -1,0 +1,311 @@
+---
+title: "Partial Response Curves from ENM Models"
+author: "Your Name"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: flatly
+---
+
+# Partial Response Curves from Ensemble Niche Models
+
+This script extracts and visualizes partial response curves from the fitted ENM models, showing how species responses vary with environmental variables across biogeographic units and seasons.
+
+---
+
+## 1. Setup and Libraries
+
+### 1.1 Load Required Libraries
+
+```{r setup, message=FALSE, warning=FALSE}
+library(terra)
+library(embarcadero)
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(viridisLite)
+
+# Set working directory
+setwd("C:/Users/mario/OneDrive - Universitat de Barcelona/Escritorio")
+wd <- getwd()
+```
+
+---
+
+## 2. Load Models and Covariates
+
+### 2.1 Load Fitted Group Models
+
+```{r load_models}
+# List group model files
+Group_models_list <- list.files(
+  paste0(wd, "/Habitat_modelling/Results/Biogeographic/"), 
+  pattern = ".RDS", 
+  full.names = TRUE
+)
+
+# Load and flatten models
+Group_models <- lapply(Group_models_list, readRDS)
+Group_models <- do.call(c, Group_models)
+
+cat("Group models loaded:", length(Group_models), "\n")
+```
+
+### 2.2 Load Breeding Covariates for Scaling Reference
+
+```{r load_covariates}
+# Load breeding season covariates for unscaling predictions
+predictors_original_breeding <- rast(
+  list.files(
+    paste0(wd, '/Habitat_modelling/vars/breeding_climatology'),
+    pattern = ".tif", 
+    full.names = TRUE
+  )
+)
+
+names(predictors_original_breeding) <- c(
+  "BATH", "CHLa_mean", "CHLa_sd", "CHLag_mean",
+  "CHLag_sd", "gIUV_mean", "gIUV_sd",
+  "MLD_mean", "MLD_sd", "NPP_mean",
+  "NPP_sd", "NPPg_mean", "NPPg_sd", "SLOPE",
+  "SSH_mean", "SSH_sd", "SSS_mean", "SSS_sd",
+  "SSSg_mean", "SSSg_sd", "SST_mean", "SST_sd",
+  "SSTg_mean", "SSTg_sd", "Wind_mean", "Wind_sd"
+)
+
+cat("Breeding covariates loaded for scaling reference\n")
+```
+
+---
+
+## 3. Select and Organize Models
+
+### 3.1 Define Variables by Season
+
+```{r define_variables}
+# Define variables to extract partial effects for each season
+vars <- list(
+  breeding = c("NPP_mean", "SST_mean", "SST_sd", "SSS_mean", "SSH_mean", "SSH_sd", "BATH"),
+  nonbreeding = c("SST_mean", "SST_sd", "SSS_mean", "SSH_mean", "SSH_sd")
+)
+
+cat("Variables defined for partial effects analysis\n")
+```
+
+### 3.2 Extract Specific Models for Each Biogeographic Unit and Season
+
+```{r select_models}
+# Extract models for each biogeographic unit and season
+wmb <- Filter(Negate(is.null), Group_models[grepl("WesternMost_breeding", names(Group_models))][1])
+wmnb <- Filter(Negate(is.null), Group_models[grepl("WesternMost_non-breeding", names(Group_models))][1])
+cwb <- Filter(Negate(is.null), Group_models[grepl("Central-West_breeding", names(Group_models))][1])
+cwnb <- Filter(Negate(is.null), Group_models[grepl("Central-West_non-breeding", names(Group_models))][1])
+ceb <- Filter(Negate(is.null), Group_models[grepl("Central-East_breeding", names(Group_models))][1])
+cenb <- Filter(Negate(is.null), Group_models[grepl("Central-East_non-breeding", names(Group_models))][1])
+emb <- Filter(Negate(is.null), Group_models[grepl("EasternMost_breeding", names(Group_models))][1])
+emnb <- Filter(Negate(is.null), Group_models[grepl("EasternMost_non-breeding", names(Group_models))][1])
+
+# Organize models in list
+unit_models <- list(
+  WesternMost_breeding = wmb,
+  WesternMost_nonbreeding = wmnb,
+  CentralWest_breeding = cwb,
+  CentralWest_nonbreeding = cwnb,
+  CentralEast_breeding = ceb,
+  CentralEast_nonbreeding = cenb,
+  EasternMost_breeding = emb,
+  EasternMost_nonbreeding = emnb
+)
+
+cat("Models selected for all biogeographic units and seasons\n")
+```
+
+---
+
+## 4. Calculate Partial Effects
+
+### 4.1 Extract Partial Response Curves
+
+```{r calculate_partials, message=TRUE}
+# Calculate partial effects for all models and variables
+partials_all <- list()
+
+for (unit_name in names(unit_models)) {
+  
+  message("Running partials for: ", unit_name)
+  
+  mod <- unit_models[[unit_name]][[1]]
+  
+  # Detect period
+  period <- ifelse(grepl("nonbreeding", unit_name), "nonbreeding", "breeding")
+  vars_here <- vars[[period]]
+  
+  df_unit <- data.frame()
+  
+  # Get variables actually present in the model
+  vars_in_model <- row.names(varimp(mod))
+  
+  for (v in vars_here) {
+    
+    # Skip variables not in model
+    if (!(v %in% vars_in_model)) {
+      message("  Skipping ", v, " (not in model)")
+      next
+    }
+    
+    message("  Variable: ", v)
+    
+    # Calculate partial effect
+    part <- partial(
+      mod,
+      x.vars = v,
+      trace = FALSE,
+      ci = TRUE,
+      equal = TRUE,
+      smooth = 10,
+      panels = FALSE
+    )
+    
+    # Extract data
+    df_v <- part[[1]]$data %>%
+      dplyr::mutate(
+        variable = v,
+        unit = unit_name,
+        period = period
+      )
+    
+    df_unit <- dplyr::bind_rows(df_unit, df_v)
+  }
+  
+  partials_all[[unit_name]] <- df_unit
+}
+
+# Combine all partial effects
+partials_df <- dplyr::bind_rows(partials_all)
+
+cat("\nPartial effects calculated\n")
+cat("Variables in partial effects:", unique(partials_df$variable), "\n")
+```
+
+### 4.2 Unscale Partial Effects Back to Original Scale
+
+```{r unscale_partials}
+# Calculate scaling attributes for each variable
+scaled_npp <- scale(predictors_original_breeding$NPP_mean[])
+scaled_ssh_sd <- scale(predictors_original_breeding$SSH_sd[])
+scaled_ssh <- scale(predictors_original_breeding$SSH_mean[])
+scaled_sss <- scale(predictors_original_breeding$SSS_mean[])
+scaled_sst <- scale(predictors_original_breeding$SST_mean[])
+scaled_sst_sd <- scale(predictors_original_breeding$SST_sd[])
+scaled_bath <- scale(predictors_original_breeding$BATH[])
+
+# Unscale partial effects back to original units
+partials_df <- partials_df %>% 
+  mutate(
+    x2 = case_when(
+      variable == "NPP_mean" ~ x * attr(scaled_npp, 'scaled:scale') + attr(scaled_npp, 'scaled:center'),
+      variable == "SSH_mean" ~ x * attr(scaled_ssh, 'scaled:scale') + attr(scaled_ssh, 'scaled:center'),
+      variable == "SSH_sd" ~ x * attr(scaled_ssh_sd, 'scaled:scale') + attr(scaled_ssh_sd, 'scaled:center'),
+      variable == "SSS_mean" ~ x * attr(scaled_sss, 'scaled:scale') + attr(scaled_sss, 'scaled:center'),
+      variable == "SST_mean" ~ x * attr(scaled_sst, 'scaled:scale') + attr(scaled_sst, 'scaled:center'),
+      variable == "SST_sd" ~ x * attr(scaled_sst_sd, 'scaled:scale') + attr(scaled_sst_sd, 'scaled:center'),
+      variable == "BATH" ~ x * attr(scaled_bath, 'scaled:scale') + attr(scaled_bath, 'scaled:center'),
+      TRUE ~ NA_real_
+    ),
+    unit = factor(
+      sub("_breeding$|_nonbreeding$", "", unit),
+      levels = c("WesternMost", "CentralWest", "CentralEast", "EasternMost")
+    ),
+    period = as.factor(ifelse(period == "breeding", "Breeding", "Non-breeding"))
+  ) %>%
+  filter(variable != "BATH")
+
+# Save partial effects to file
+write.csv(partials_df, 
+          file = paste0(wd, '/Habitat_modelling/Results/partials.csv'),
+          row.names = FALSE)
+
+cat("Partial effects unscaled and saved\n")
+```
+
+---
+
+## 5. Visualization
+
+### 5.1 Create Partial Response Curves Plot
+
+```{r plot_partials, fig.width=12, fig.height=8}
+# Define colors for biogeographic units
+colors <- mako(12)[c(1, 5, 7, 10)]
+colors <- setNames(colors, levels(partials_df$unit))
+
+# Create partial response plot
+p_partial <- ggplot(partials_df, aes(x = x2, color = unit, group = unit)) + 
+  geom_ribbon(aes(ymin = q05, ymax = q95, fill = unit), color = NA, alpha = 0.2) + 
+  geom_line(aes(y = med), size = 0.8) + 
+  theme_bw() + 
+  labs(
+    x = "Value", 
+    y = "Response",
+    color = "Biogeographical unit",
+    fill = "Biogeographical unit"
+  ) +
+  scale_colour_manual(values = colors) +
+  scale_fill_manual(values = colors) +
+  facet_grid(period ~ variable, scales = "free_x") +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom",
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 11),
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 10),
+    strip.text = element_text(size = 12, face = "bold")
+  )
+
+# Display plot
+print(p_partial)
+
+# Save to file
+ggsave(
+  paste0(wd, "/Habitat_modelling/Results/partial_effects.png"), 
+  p_partial, 
+  width = 12, height = 8, dpi = 600
+)
+
+cat("Partial response curves plot saved to: ", 
+    paste0(wd, "/Habitat_modelling/Results/partial_effects.png\n"))
+```
+
+---
+
+## Summary
+
+This workflow extracts and visualizes partial response curves from the fitted ENM models at the biogeographic group level:
+
+### Key Features:
+
+- **Partial Response Curves**: Show how species suitability responds to each environmental variable
+- **Confidence Intervals**: 95% confidence intervals (shaded areas) indicate uncertainty
+- **Biogeographic Comparison**: Four biogeographic units shown in different colors
+- **Seasonal Separation**: Breeding and non-breeding seasons analyzed separately
+- **Variable-Specific Predictors**: Different variables are relevant for each season
+
+### Output:
+
+- `partials.csv` - Raw partial effect data (scaled values)
+- `partial_effects.png` - Visualization of partial response curves
+
+### Variables Analyzed:
+
+**Breeding Season:** NPP_mean, SST_mean, SST_sd, SSS_mean, SSH_mean, SSH_sd
+
+**Non-Breeding Season:** SST_mean, SST_sd, SSS_mean, SSH_mean, SSH_sd
+
+---
+
+*Last updated: `r Sys.Date()`*
