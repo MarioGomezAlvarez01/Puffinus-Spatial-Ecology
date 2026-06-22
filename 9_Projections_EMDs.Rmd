@@ -1,0 +1,613 @@
+---
+title: "Earth Mover's Distance (EMD) and Geographic Correlations"
+author: "Your Name"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: flatly
+---
+
+# EMD and Geographic Distance Correlations
+
+This script calculates Earth Mover's Distance (EMD) between population habitat projections and correlates it with geographic distance across biogeographic units and seasons.
+
+---
+
+## 1. Setup and Libraries
+
+### 1.1 Load Required Libraries
+
+```{r setup, message=FALSE, warning=FALSE}
+library(raster)
+library(sp)
+library(sf)
+library(terra)
+library(ggplot2)
+library(readxl)
+library(embarcadero)
+library(emdist)
+library(gdistance)
+library(tidyr)
+library(dplyr)
+library(ggrepel)
+library(viridisLite)
+library(broom)
+library(lme4)
+
+# Set working directory
+setwd("C:/Users/mario/OneDrive - Universitat de Barcelona/Escritorio")
+wd <- getwd()
+```
+
+---
+
+## 2. Load and Prepare Data
+
+### 2.1 Load Population Predictions
+
+```{r load_predictions}
+# Load breeding season predictions
+predictions_b <- stack(paste0(wd, "/Habitat_modelling/Results/Population/Population_pred_breeding.tif"))
+names(predictions_b) <- c("France", "Mallorca", "Sardinia", "Minorca",
+                          "Ibiza", "Malta", "Greece", "Croatia")
+
+# Aggregate to lower resolution for faster computation
+predictions_b_low <- aggregate(predictions_b, fact = 2, fun = mean)
+
+# Load non-breeding season predictions
+predictions_nb <- stack(paste0(wd, "/Habitat_modelling/Results/Population/Population_pred_non-breeding.tif"))
+names(predictions_nb) <- names(predictions_b)
+predictions_nb_low <- aggregate(predictions_nb, fact = 2, fun = mean)
+
+cat("Predictions loaded and aggregated\n")
+```
+
+### 2.2 Load and Prepare Colony Data
+
+```{r load_colonies}
+# Load colony data
+colonies <- read_excel("C:/Users/mario/OneDrive - Universitat de Barcelona/R_code/Colony.xlsx")
+
+# Clean and assign population/taxa
+colonies <- colonies[-c(2, 14), ] %>%
+  mutate(
+    taxa = case_when( 
+      Colony %in% c("Sa Conillera", "Sa Cella") ~ "PUFMAU",
+      TRUE ~ "PUFYEL"
+    ),
+    population = case_when(
+      Colony %in% c("Sa Conillera", "Sa Cella") ~ "WesternMost",
+      Colony %in% c("La Mola", "Porquerolles", "Port-Cros", "Colata") ~ "Central-West",
+      Colony %in% c("Kappari", "Gyaros") ~ "EasternMost",
+      TRUE ~ "Central-East"
+    ),
+    pop = case_when(
+      Colony == "Sa Conillera" ~ "Ibiza",
+      Colony == "Sa Cella" ~ "Mallorca",
+      Colony == "La Mola" ~ "Minorca",
+      Colony == "Colata" ~ "Sardinia",
+      Colony %in% c("Port-Cros", "Porquerolles", "France") ~ "France",
+      Colony %in% c("Rdum", "Majjistral") ~ "Malta",
+      Colony %in% c("Zaklopatica", "Veli Maslovnjak") ~ "Croatia",
+      Colony %in% c("Kappari", "Gyaros") ~ "Greece",
+      TRUE ~ NA_character_
+    )
+  )
+
+# Define population groups
+cols <- c("Ibiza", "Mallorca", "Minorca", "France", "Sardinia", "Malta", "Croatia", "Greece")
+PUFMAU_cols <- c("Ibiza", "Mallorca")
+PUFYEL_cols <- c("Minorca", "France", "Sardinia", "Malta", "Croatia", "Greece")
+g1_cols <- c("Ibiza", "Mallorca", "Minorca")
+g2_cols <- c("France", "Sardinia")
+g3_cols <- c("Malta", "Croatia")
+g4_cols <- c("Greece")
+
+cat("Colony data prepared\n")
+```
+
+### 2.3 Create All Pairwise Comparisons
+
+```{r create_pairs}
+# Create all pairs of populations
+col_pairs <- combn(seq_along(cols), 2)
+n_pairs <- ncol(col_pairs)  # 28 pairs
+
+cat("Total population pairs:", n_pairs, "\n")
+```
+
+---
+
+## 3. Calculate Earth Mover's Distance (EMD)
+
+### 3.1 Compute EMD for All Population Pairs
+
+```{r calculate_emd, message=TRUE}
+# Initialize results data frame
+emd_monthly_pop <- data.frame(
+  period = character(),
+  pop1 = character(),
+  pop2 = character(),
+  emd = numeric()
+)
+
+# Calculate EMD for each season and population pair
+for (i in c("Breeding", "Non-breeding")) {
+  
+  if (i == "Breeding") {
+    rast_list <- predictions_b_low[[cols]]
+  } else {
+    rast_list <- predictions_nb_low[[cols]]
+  }
+  
+  for (k in 1:n_pairs) {
+    
+    j1 <- col_pairs[1, k]
+    j2 <- col_pairs[2, k]
+    
+    p1 <- rast_list[[j1]]
+    p2 <- rast_list[[j2]]
+    
+    m1 <- as.matrix(p1)
+    m2 <- as.matrix(p2)
+    
+    # Keep only cells where both have data
+    valid_mask <- !is.na(m1) & !is.na(m2)
+    m1[!valid_mask] <- 0
+    m2[!valid_mask] <- 0
+    
+    # Normalize to probability distributions
+    m1 <- m1 / sum(m1)
+    m2 <- m2 / sum(m2)
+    
+    # Calculate EMD
+    emd_val <- emd2d(m1, m2)
+    
+    emd_monthly_pop <- rbind(
+      emd_monthly_pop,
+      data.frame(
+        period = i,
+        pop1 = cols[j1],
+        pop2 = cols[j2],
+        emd = emd_val
+      )
+    )
+    
+    gc()
+  }
+  
+  cat(i, "done\n")
+}
+
+cat("EMD calculations completed\n")
+cat("Total EMD values:", nrow(emd_monthly_pop), "\n")
+```
+
+### 3.2 Classify Population Pairs by Biogeographic Unit
+
+```{r classify_pairs}
+# Classify pairs as within or between biogeographic units
+emd_monthly_pop2 <- emd_monthly_pop %>%
+  mutate(
+    group = case_when(
+      pop1 %in% g1_cols & pop2 %in% g1_cols ~ "WesternMost",
+      pop1 %in% g1_cols & !pop2 %in% g1_cols ~ "Between-unit",
+      !pop1 %in% g1_cols & pop2 %in% g1_cols ~ "Between-unit",
+      pop1 %in% g2_cols & pop2 %in% g2_cols ~ "Central-West",
+      pop1 %in% g2_cols & !pop2 %in% g2_cols ~ "Between-unit",
+      !pop1 %in% g2_cols & pop2 %in% g2_cols ~ "Between-unit",
+      pop1 %in% g3_cols & pop2 %in% g3_cols ~ "Central-East",
+      pop1 %in% g3_cols & !pop2 %in% g3_cols ~ "Between-unit",
+      !pop1 %in% g3_cols & pop2 %in% g3_cols ~ "Between-unit",
+      pop1 %in% g4_cols & pop2 %in% g4_cols ~ "EasternMost",
+      pop1 %in% g4_cols & !pop2 %in% g4_cols ~ "Between-unit",
+      !pop1 %in% g4_cols & pop2 %in% g4_cols ~ "Between-unit",
+      TRUE ~ NA_character_
+    )
+  )
+
+cat("Population pairs classified by biogeographic unit\n")
+```
+
+---
+
+## 4. Calculate Geographic Distances
+
+### 4.1 Prepare Ocean Raster for Cost-Distance Calculation
+
+```{r prepare_ocean_raster}
+# Load land-ocean polygon
+global.polygon <- "C:/Users/mario/OneDrive - Universitat de Barcelona/Escritorio/Migratory connectivity/GSHHS_shp/l/GSHHS_l_L1.shp"
+ocean <- shapefile(global.polygon)
+
+# Define region bounds
+xmin <- -20
+xmax <- 50
+ymin <- 20
+ymax <- 55
+resolution <- 0.05
+
+# Crop to study region
+ocean <- crop(ocean, extent(xmin, xmax, ymin, ymax))
+
+# Create raster template
+region.as.table <- matrix(NA, nrow = ((ymax - ymin) / resolution), ncol = ((xmax - xmin) / resolution))
+region.as.raster <- raster(region.as.table)
+extent(region.as.raster) <- c(xmin, xmax, ymin, ymax)
+
+# Rasterize ocean (1 = ocean, 0 = land)
+ocean.r <- rasterize(ocean, region.as.raster)
+ocean.r[!is.na(ocean.r)] <- 0
+ocean.r[is.na(ocean.r)] <- 1
+
+cat("Ocean raster prepared\n")
+```
+
+### 4.2 Relocate Colonies to Ocean if Necessary
+
+```{r relocate_colonies}
+# Select subset of colonies for distance calculation
+colonies <- colonies[c(1:3, 5, 6, 9, 11, 12), ]
+
+# Convert to spatial
+sites_sf <- st_as_sf(colonies, coords = c("Lon", "Lat"), crs = 4326)
+sites <- as.data.frame(st_coordinates(sites_sf))
+
+# Check which sites are on land
+sites.to.relocate <- raster::extract(ocean.r, sites) == 0
+sites.to.relocate.xy <- sites[sites.to.relocate, ]
+
+# Relocate land-based sites to nearest ocean cell
+if (nrow(sites.to.relocate.xy) > 0) {
+  
+  cat("\n.....................................................................\n\n")
+  
+  if (nrow(sites.to.relocate.xy) == 1) {
+    cat(" 1 site to be relocated.\n")
+  } 
+  if (nrow(sites.to.relocate.xy) > 1) {
+    cat(" ", nrow(sites.to.relocate.xy), "sites to be relocated.\n")
+  }
+  
+  ocean.r.sites <- as.data.frame(ocean.r, xy = TRUE)[, 1:2]
+  ocean.r.sites <- cbind(ocean.r.sites, raster::extract(ocean.r, ocean.r.sites))
+  ocean.r.sites <- ocean.r.sites[ocean.r.sites[, 3] == 1, 1:2]
+  
+  for (i in 1:nrow(sites.to.relocate.xy)) {
+    near.cells <- as.data.frame(
+      sort(sp::spDistsN1(as.matrix(ocean.r.sites), 
+                         as.matrix(sites.to.relocate.xy[i, 1:2]), 
+                         longlat = TRUE), 
+           decreasing = FALSE, 
+           index.return = TRUE)
+    )
+    sites[which(sites.to.relocate)[i], ] <- ocean.r.sites[near.cells[1, 2], ]
+  }
+}
+
+colonies$Lon <- sites$X
+colonies$Lat <- sites$Y
+
+cat("Colonies relocated to ocean\n")
+```
+
+### 4.3 Calculate Minimum Marine Distance Between Colonies
+
+```{r calculate_marine_distance}
+# Create cost surface (ocean = movement cost 1, land = no movement)
+cost.surface <- ocean.r
+projection(cost.surface) <- CRS("+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0")
+
+# Calculate transition matrix
+raster_tr <- gdistance::transition(cost.surface, mean, directions = 8)
+raster_tr_corrected <- gdistance::geoCorrection(raster_tr, type = "c", multpl = FALSE)
+
+# Calculate cost distances between all colony pairs
+raster_cosDist <- gdistance::costDistance(
+  raster_tr_corrected,
+  as.matrix(colonies[, c("Lon", "Lat")]),
+  as.matrix(colonies[, c("Lon", "Lat")])
+)
+
+# Convert to kilometers
+distance.marine <- as.matrix(raster_cosDist) / 1000
+
+cat("Marine distances calculated\n")
+```
+
+### 4.4 Merge EMD and Geographic Distance Data
+
+```{r merge_emd_distance}
+# Convert distance matrix to long format
+dist_df <- as.data.frame(distance.marine)
+dist_df$col1 <- colonies$pop
+
+dist_long <- dist_df %>%
+  pivot_longer(
+    cols = -col1,
+    names_to = "col2_idx",
+    values_to = "distance"
+  ) %>%
+  mutate(
+    col2_idx = as.integer(gsub("\\D", "", col2_idx)),
+    col2 = colonies$pop[col2_idx]
+  ) %>%
+  dplyr::select(col1, col2, distance)
+
+# Merge with EMD data
+emd_monthly_pop_final <- emd_monthly_pop2 %>%
+  mutate(period = as.factor(period)) %>%
+  left_join(
+    dist_long, 
+    by = c("pop1" = "col1", "pop2" = "col2")
+  )
+
+cat("EMD and geographic distance data merged\n")
+cat("Final dataset:", nrow(emd_monthly_pop_final), "pairwise comparisons\n")
+```
+
+---
+
+## 5. Visualization
+
+### 5.1 Prepare Data for Plotting
+
+```{r prepare_plot_data}
+# Expand data to long format for plotting
+emd_plot <- emd_monthly_pop_final %>%
+  mutate(id = row_number()) %>%
+  tidyr::pivot_longer(
+    cols = c(pop1, pop2),
+    names_to = "which",
+    values_to = "pop"
+  )
+
+emd_plot$pop <- factor(emd_plot$pop, levels = unique(c(emd_monthly_pop_final$pop1, emd_monthly_pop_final$pop2)))
+emd_plot$group <- factor(emd_plot$group, levels = c("WesternMost", "Central-West", "Central-East", "EasternMost", "Between-unit"))
+
+# Prepare unique pair data
+emd_plot_unique <- emd_plot %>%
+  dplyr::select(id, period, emd, distance, group, which, pop) %>%
+  pivot_wider(names_from = which, values_from = pop) %>%
+  mutate(label = paste(pop1, pop2, sep = "–"))
+
+# Add taxa classification
+emd_plot_unique <- emd_plot_unique %>%
+  mutate(
+    Taxa = case_when(
+      pop1 %in% PUFMAU_cols & pop2 %in% PUFMAU_cols ~ "PUFMAU",
+      pop1 %in% PUFMAU_cols & !pop2 %in% PUFMAU_cols ~ "Between-taxa",
+      !pop1 %in% PUFMAU_cols & pop2 %in% PUFMAU_cols ~ "Between-taxa",
+      pop1 %in% PUFYEL_cols & pop2 %in% PUFYEL_cols ~ "PUFYEL",
+      TRUE ~ NA_character_
+    ),
+    Taxa = factor(Taxa, levels = c("PUFMAU", "PUFYEL", "Between-taxa"))
+  )
+
+cat("Plot data prepared\n")
+```
+
+### 5.2 Plot EMD vs Geographic Distance with Population Labels
+
+```{r plot_emd_labeled}
+# Define colors for biogeographic units
+colors <- c(mako(4))
+colors <- setNames(colors, levels(factor(emd_plot_unique$group)))
+colors["Between-unit"] <- "gray60"
+
+# Create plot
+p2.1 <- ggplot(emd_plot_unique, aes(x = distance, y = emd, colour = group)) + 
+  facet_wrap(~ period, labeller = labeller(
+    period = c("Breeding" = "Breeding", "Non-breeding" = "Non-breeding")
+  )) +
+  geom_point(aes(shape = Taxa), alpha = 0.7, size = 3) +
+  geom_smooth(aes(group = 1), method = "lm", se = TRUE, colour = "black") +
+  ggrepel::geom_text_repel(
+    data = subset(emd_plot_unique),
+    aes(label = label),
+    size = 3,
+    colour = "black",
+    show.legend = FALSE,
+    max.overlaps = 20
+  ) +
+  scale_colour_manual(values = colors) +
+  labs(
+    x = "Minimum marine distance (km)",
+    y = "Earth Mover's Distance",
+    colour = "Biogeographical unit",
+    shape = "Taxa"
+  ) +
+  theme_bw() +
+  theme(
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 11),
+    legend.position = "top",
+    legend.box = "vertical",
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 11),
+    strip.text = element_text(size = 12, face = "bold")
+  ) +
+  xlim(c(-100, 2400))
+
+print(p2.1)
+
+ggsave(paste0(wd, "/Habitat_modelling/Results/plot_emd_dist.png"), 
+       p2.1, width = 10, height = 6, dpi = 600)
+
+cat("Labeled EMD plot saved\n")
+```
+
+### 5.3 Plot EMD vs Distance with R² Values
+
+```{r plot_emd_rsquared}
+# Calculate R² for each period and group
+r2_values <- emd_plot %>%
+  group_by(period, group) %>%
+  do(glance(lm(emd ~ distance, data = .))) %>%
+  dplyr::select(period, group, r.squared)
+
+# Prepare labels for plot
+label_df <- emd_plot %>%
+  group_by(period, group) %>%
+  summarize(
+    r.squared = first(r.squared),
+    distance = max(distance, na.rm = TRUE),
+    emd = max(emd, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    emd = max(emd),
+    distance = max(distance, na.rm = TRUE) * 0.9
+  ) %>%
+  filter(r.squared > 0)
+
+label_df$group <- factor(label_df$group, levels = c("WesternMost", "Central-West", "Central-East", "EasternMost", "Between-unit"))
+
+# Create plot
+p2 <- ggplot(emd_plot, aes(x = distance, y = emd, colour = group)) +
+  facet_wrap(~ period) +
+  geom_point(alpha = 0.6, size = 1) +
+  geom_smooth(method = "lm", linewidth = 1, se = TRUE, show.legend = FALSE) +
+  ggrepel::geom_text_repel(
+    data = label_df,
+    aes(x = distance, y = emd, label = paste0("R² = ", round(r.squared, 3)), colour = group),
+    inherit.aes = FALSE,
+    size = 3,
+    hjust = 1,
+    show.legend = FALSE
+  ) +
+  scale_colour_viridis_d(name = NULL, direction = -1) +
+  labs(
+    x = "Minimum marine distance (km)",
+    y = "Earth Mover's Distance"
+  ) +
+  theme_bw()
+
+print(p2)
+
+ggsave(paste0(wd, "/Habitat_modelling/Results/plot_final.png"), 
+       p2, width = 10, height = 6, dpi = 600)
+
+cat("R² plot saved\n")
+```
+
+---
+
+## 6. Statistical Analysis
+
+### 6.1 Classify Comparisons as Within or Between Units
+
+```{r classify_comparisons}
+# Create function to get group membership
+group_list <- list(
+  g1 = g1_cols,
+  g2 = g2_cols,
+  g3 = g3_cols,
+  g4 = g4_cols
+)
+
+get_group <- function(colony) {
+  for (g in names(group_list)) {
+    if (colony %in% group_list[[g]]) return(g)
+  }
+  return(NA)
+}
+
+# Add group assignments and comparison type
+emd_monthly_pop_final <- emd_monthly_pop_final %>%
+  mutate(
+    group1 = sapply(pop1, get_group),
+    group2 = sapply(pop2, get_group),
+    comparison_type = ifelse(group1 == group2, "within", "between")
+  )
+
+cat("Comparisons classified\n")
+```
+
+### 6.2 Linear Models by Season
+
+```{r lm_breeding}
+# Linear regression for breeding season
+model_breeding <- lm(emd ~ distance,
+                     data = emd_monthly_pop_final %>% filter(period == "Breeding"))
+
+cat("\n===== Breeding Season Model =====\n")
+print(summary(model_breeding))
+```
+
+```{r lm_nonbreeding}
+# Linear regression for non-breeding season
+model_nonbreeding <- lm(emd ~ distance,
+                        data = emd_monthly_pop_final %>% filter(period == "Non-breeding"))
+
+cat("\n===== Non-Breeding Season Model =====\n")
+print(summary(model_nonbreeding))
+```
+
+### 6.3 Linear Mixed-Effects Model
+
+```{r lmer_model}
+# Mixed effects model with random intercepts for populations
+model_lmer <- lmer(
+  emd ~ distance + period + (1 | pop1) + (1 | pop2),
+  data = emd_monthly_pop_final
+)
+
+cat("\n===== Linear Mixed-Effects Model =====\n")
+print(summary(model_lmer))
+```
+
+### 6.4 Visualization of Within vs Between Unit Comparisons
+
+```{r plot_within_between}
+ggplot(emd_monthly_pop_final, aes(x = distance, y = emd, color = comparison_type)) +
+  geom_point(size = 3, alpha = 0.8) +
+  geom_smooth(method = "lm", se = TRUE) +
+  facet_wrap(~ period) +
+  theme_classic() +
+  labs(
+    x = "Geographic distance (km)",
+    y = "Earth Mover's Distance",
+    color = "Comparison type"
+  ) +
+  theme(
+    axis.title = element_text(size = 12),
+    axis.text = element_text(size = 11),
+    strip.text = element_text(size = 12, face = "bold"),
+    legend.title = element_text(size = 12),
+    legend.text = element_text(size = 11)
+  )
+
+cat("Within vs. Between unit comparison plot displayed\n")
+```
+
+---
+
+## Summary
+
+This workflow analyzes the relationship between Earth Mover's Distance (EMD) and geographic distance:
+
+### Key Steps:
+
+1. **EMD Calculation** - Compares habitat suitability distributions between population pairs
+2. **Geographic Distance** - Calculates minimum marine distance between colonies
+3. **Correlation Analysis** - Examines EMD-distance relationships by biogeographic unit and season
+4. **Statistical Models** - Linear and mixed-effects models quantify significant relationships
+
+### Key Findings:
+
+- **Breeding vs Non-breeding**: Different EMD-distance relationships by season
+- **Biogeographic Units**: Within-unit comparisons vs. between-unit comparisons
+- **Taxa Differentiation**: PUFMAU vs. PUFYEL population divergence patterns
+
+### Output Files:
+
+- `plot_emd_dist.png` - Labeled population pairs with EMD-distance relationships
+- `plot_final.png` - R² values for each biogeographic unit and season
+
+---
+
+*Last updated: `r Sys.Date()`*
