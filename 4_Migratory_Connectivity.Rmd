@@ -36,7 +36,7 @@ shearwaters at three hierarchical levels:
 1. **Taxon level** — Balearic (PUFMAU) vs. Yelkouan (PUFYEL) shearwaters.
 2. **Biogeographical level** — Four biogeographic units (WesternMost, Central-West,
    Central-East, EasternMost).
-3. **Population level** — Individual breeding populations within each group.
+3. **Population level** — Individual breeding populations within each unit.
 
 ---
 
@@ -333,7 +333,7 @@ by `estMC()`.
 ## Origin Sites
 
 Each breeding colony is represented by a circular buffer of radius 50 km,
-giving one origin polygon per population. Group- and taxon-level polygons
+giving one origin polygon per population. Unit- and taxon-level polygons
 are formed by dissolving individual colony buffers.
 
 ```{r origin-sites-dist}
@@ -354,7 +354,7 @@ originSites_PUFMAU <- originSites_col %>%
 originSites_PUFYEL <- originSites_col %>%
   filter(Taxon == "PUFYEL")
 
-# Separate by group
+# Separate by unit
 originSites_WM <- originSites_col %>%
   filter(Group == "WesternMost")
 originSites_CW <- originSites_col %>%
@@ -364,8 +364,8 @@ originSites_CE <- originSites_col %>%
 originSites_EM <- originSites_col %>%
   filter(Group == "EasternMost")
 
-# Group-level origin polygons (union of colony buffers within each group)
-originSites_group <- originSites_col %>%
+# Unit-level origin polygons (union of colony buffers within each unit)
+originSites_unit <- originSites_col %>%
   group_by(Group) %>%
   summarise(geometry = st_union(geometry), .groups = "drop") %>%
   rename(site_id = Group)
@@ -374,15 +374,15 @@ originSites_group <- originSites_col %>%
 originDist_col <- calculate_distance_matrix(originSites_col, ocean.r)
 colnames(originDist_col) <- rownames(originSites_col) <-  originSites_col$Pop
 
-cat("Group origin distance matrix:\n")
-print(round(originDist_group, 1))
+cat("Unit origin distance matrix:\n")
+print(round(originDist_unit, 1))
 
-# Group-level distance
-originDist_group <- calculate_distance_matrix(originSites_group, ocean.r)
-colnames(originDist_group) <- rownames(originDist_group) <-  originSites_group$site_id
+# Unit-level distance
+originDist_unit <- calculate_distance_matrix(originSites_unit, ocean.r)
+colnames(originDist_unit) <- rownames(originDist_unit) <-  originSites_unit$site_id
 
-cat("Group origin distance matrix:\n")
-print(round(originDist_group, 1))
+cat("Unit origin distance matrix:\n")
+print(round(originDist_unit, 1))
 
 # Taxon-level origin polygons (union of colony buffers within each taxon)
 originSites_taxon <- originSites_col %>%
@@ -399,28 +399,28 @@ print(round(originDist_taxon, 1))
 
 cat("Origin sites defined:\n")
 cat(" Population level:", nrow(originSites_col),    "points\n")
-cat(" Group level: ", nrow(originSites_group), "points\n")
+cat(" Unit level: ", nrow(originSites_unit), "points\n")
 cat(" Taxon level: ", nrow(originSites_taxon), "points\n")
 
 ### --- Pairwise comparisons between biogeographical units --- ###
 
 # WesternMost vs Central-West
-originSites_WM_CW <- originSites_group %>%
+originSites_WM_CW <- originSites_unit %>%
   filter(site_id %in% c("WesternMost", "Central-West"))
 
 
 
-originDist_WM_CW <- originDist_group[c("WesternMost", "Central-West"),
+originDist_WM_CW <- originDist_unit[c("WesternMost", "Central-West"),
                                      c("WesternMost", "Central-West"), 
                                      drop = FALSE]
 cat("\nDistance matrix: WesternMost vs Central-West\n")
 print(round(originDist_WM_CW, 1))
 
 # WesternMost vs Central-East
-originSites_WM_CE <- originSites_group %>%
+originSites_WM_CE <- originSites_unit %>%
   filter(site_id %in% c("WesternMost", "Central-East"))
 
-originDist_WM_CE <- originDist_group[c("WesternMost", "Central-East"),
+originDist_WM_CE <- originDist_unit[c("WesternMost", "Central-East"),
                                      c("WesternMost", "Central-East"), 
                                      drop = FALSE]
 
@@ -428,10 +428,10 @@ cat("\nDistance matrix: WesternMost vs Central-East\n")
 print(round(originDist_WM_CE, 1))
 
 # WesternMost vs EasternMost
-originSites_WM_EM <- originSites_group %>%
+originSites_WM_EM <- originSites_unit %>%
   filter(site_id %in% c("WesternMost", "EasternMost"))
 
-originDist_WM_EM <- originDist_group[c("WesternMost", "EasternMost"),
+originDist_WM_EM <- originDist_unit[c("WesternMost", "EasternMost"),
                                      c("WesternMost", "EasternMost"), 
                                      drop = FALSE]
 
@@ -439,10 +439,10 @@ cat("\nDistance matrix: WesternMost vs EasternMost\n")
 print(round(originDist_WM_EM, 1))
 
 # Central-West vs Central-East
-originSites_CW_CE <- originSites_group %>%
+originSites_CW_CE <- originSites_unit %>%
   filter(site_id %in% c("Central-West", "Central-East"))
 
-originDist_CW_CE <- originDist_group[c("Central-West", "Central-East"),
+originDist_CW_CE <- originDist_unit[c("Central-West", "Central-East"),
                                      c("Central-West", "Central-East"), 
                                      drop = FALSE]
 
@@ -450,10 +450,10 @@ cat("\nDistance matrix: Central-West vs Central-East\n")
 print(round(originDist_CW_CE, 1))
 
 # Central-West vs EasternMost
-originSites_CW_EM <- originSites_group %>%
+originSites_CW_EM <- originSites_unit %>%
   filter(site_id %in% c("Central-West", "EasternMost"))
 
-originDist_CW_EM <- originDist_group[c("Central-West", "EasternMost"),
+originDist_CW_EM <- originDist_unit[c("Central-West", "EasternMost"),
                                      c("Central-West", "EasternMost"), 
                                      drop = FALSE]
 
@@ -461,10 +461,10 @@ cat("\nDistance matrix: Central-West vs EasternMost\n")
 print(round(originDist_CW_EM, 1))
 
 # Central-East vs EasternMost
-originSites_CE_EM <- originSites_group %>%
+originSites_CE_EM <- originSites_unit %>%
   filter(site_id %in% c("Central-East", "EasternMost"))
 
-originDist_CE_EM <- originDist_group[c("Central-East", "EasternMost"),
+originDist_CE_EM <- originDist_unit[c("Central-East", "EasternMost"),
                                      c("Central-East", "EasternMost"), 
                                      drop = FALSE]
 
@@ -530,19 +530,19 @@ originRelAbund_PUFYEL<- c(
   as.numeric(pop_sizes_PUFYEL[5,2])/sum(as.numeric(pop_sizes_PUFYEL[,2])),
   as.numeric(pop_sizes_PUFYEL[6,2])/sum(as.numeric(pop_sizes_PUFYEL[,2]))
   )
-# === Biogeographic LEVEL ===
-pop_sizes_group <- matrix(c(
-  originSites_group$site_id,
+# === Biogeographic unit LEVEL ===
+pop_sizes_unit <- matrix(c(
+  originSites_unit$site_id,
   c(1685*2+425*2,585*2+11050*2,13000*2,3000*2+300*2)), # CE,CW,EM,WM
   nrow=4,ncol=2)
 
 ### Relative abundance ####
 
-originRelAbund_group <- c(
-  as.numeric(pop_sizes_group[1,2])/sum(as.numeric(pop_sizes_group[,2])),
-  as.numeric(pop_sizes_group[2,2])/sum(as.numeric(pop_sizes_group[,2])),
-  as.numeric(pop_sizes_group[3,2])/sum(as.numeric(pop_sizes_group[,2])),
-  as.numeric(pop_sizes_group[4,2])/sum(as.numeric(pop_sizes_group[,2]))
+originRelAbund_unit <- c(
+  as.numeric(pop_sizes_unit[1,2])/sum(as.numeric(pop_sizes_unit[,2])),
+  as.numeric(pop_sizes_unit[2,2])/sum(as.numeric(pop_sizes_unit[,2])),
+  as.numeric(pop_sizes_unit[3,2])/sum(as.numeric(pop_sizes_unit[,2])),
+  as.numeric(pop_sizes_unit[4,2])/sum(as.numeric(pop_sizes_unit[,2]))
   )
 
 
@@ -725,11 +725,11 @@ print(mc_taxon)
 
 # Biogeographical-Level Analysis
 
-We next estimate MC across the four biogeographic groups, using group-level origin polygons.
+We next estimate MC across the four biogeographic units, using unit-level origin polygons.
 
 ```{r convert-meters-AEQD}
 
-originPoints_group <- dat_taxon$originPoints%>%
+originPoints_unit <- dat_taxon$originPoints%>%
   mutate(geometry = case_when(
     Group == "Central-West" ~ st_centroid(originSites_col$geometry[originSites_col$Pop == "Sardinia"]),
     Group == "Central-East" ~ st_centroid(originSites_col$geometry[originSites_col$Pop == "Malta"]),
@@ -738,31 +738,31 @@ originPoints_group <- dat_taxon$originPoints%>%
     TRUE ~ NA
   ))
 
-originPoints_group <- st_transform(originPoints_group, CRS_AEQD)
-originSites_group <- st_transform(originSites_group, CRS_AEQD)
+originPoints_unit <- st_transform(originPoints_unit, CRS_AEQD)
+originSites_unit <- st_transform(originSites_unit, CRS_AEQD)
 ```
 
 ## Estimate MC — Population Level
 
-```{r group-estMC}
-mc_group <- estMC(
+```{r unit-estMC}
+mc_unit <- estMC(
   isGL         = FALSE,
-  originDist   = originDist_group,
+  originDist   = originDist_unit,
   targetDist   = targetDist,
-  originPoints = originPoints_group,
-  targetPoints = targetPoints_taxon,
-  originSites  = originSites_group,
+  originPoints = originPoints_unit,
+  targetPoints = targetPoints_taxon, # same as mc_taxon
+  originSites  = originSites_unit,
   targetSites  = targetSites_sf,
-  originNames  = originSites_group$site_id,
+  originNames  = originSites_unit$site_id,
   targetNames  = targetSites_sf$site_id,
-  originRelAbund = originRelAbund_group,
+  originRelAbund = originRelAbund_unit,
   nSim         = 1000,
   nSamples     = 1000,
   verbose      = FALSE
 )
 
 cat("=== Population-level MC estimate ===\n")
-print(mc_group)
+print(mc_unit)
 ```
 ---
 
@@ -770,7 +770,7 @@ print(mc_group)
 
 Finally, we estimate MC *within* each taxa and biogeographic unit, treating individual
 breeding colonies as origin nodes. This reveals whether connectivity is driven
-by among-group or within-group structure.
+by among-unit or within-unit structure.
 
 ## PUFMAU (Ibiza & Mallorca)
 
@@ -787,7 +787,7 @@ cat(sprintf("PUFMAU: %d individuals\n", dat_PUFMAU$n))
 originDist_PUFMAU <- calculate_distance_matrix(originSites_PUFMAU, ocean.r)
 colnames(originDist_PUFMAU) <- rownames(originDist_PUFMAU) <-  originSites_PUFMAU$Pop
 
-cat("Group origin distance matrix:\n")
+cat("Unit origin distance matrix:\n")
 print(round(originDist_PUFMAU, 1))
 ```
 
@@ -843,7 +843,7 @@ cat(sprintf("PUFYEL: %d individuals\n", dat_PUFYEL$n))
 originDist_PUFYEL <- calculate_distance_matrix(originSites_PUFYEL, ocean.r)
 colnames(originDist_PUFYEL) <- rownames(originDist_PUFYEL) <-  originSites_PUFYEL$Pop
 
-cat("Group origin distance matrix:\n")
+cat("Unit origin distance matrix:\n")
 print(round(originDist_PUFYEL, 1))
 ```
 
@@ -904,7 +904,7 @@ cat(sprintf("WesternMost: %d individuals\n", dat_WM$n))
 originDist_WM <- calculate_distance_matrix(originSites_WM, ocean.r)
 colnames(originDist_WM) <- rownames(originDist_WM) <-  originSites_WM$Colony
 
-cat("Group origin distance matrix:\n")
+cat("Unit origin distance matrix:\n")
 print(round(originDist_WM, 1))
 ```
 
@@ -961,7 +961,7 @@ dat_CW <- prepare_analysis_level(
 originDist_CW <- calculate_distance_matrix(originSites_CW, ocean.r)
 colnames(originDist_CW) <- rownames(originDist_CW) <-  originSites_CW$Colony
 
-cat("Group origin distance matrix:\n")
+cat("Unit origin distance matrix:\n")
 print(round(originDist_CW, 1))
 ```
 
@@ -1020,7 +1020,7 @@ cat(sprintf("Central-East: %d individuals\n", dat_CE$n))
 originDist_CE <- calculate_distance_matrix(originSites_CE, ocean.r)
 colnames(originDist_CE) <- rownames(originDist_CE) <-  originSites_CE$Colony
 
-cat("Group origin distance matrix:\n")
+cat("Unit origin distance matrix:\n")
 print(round(originDist_CE, 1))
 ```
 
@@ -1080,7 +1080,7 @@ cat(sprintf("EasternMost: %d individuals\n", dat_EM$n))
 originDist_EM <- calculate_distance_matrix(originSites_EM, ocean.r)
 colnames(originDist_EM) <- rownames(originDist_EM) <-  originSites_EM$Colony
 
-cat("Group origin distance matrix:\n")
+cat("Unit origin distance matrix:\n")
 print(round(originDist_EM, 1))
 
 ```
