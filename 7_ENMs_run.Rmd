@@ -364,10 +364,10 @@ Unit.pr_period <- Unit.pr[Unit.pr$period == i, ]
   
   all.cov_list[[i]] <- list()
   
-  for (j in unique(Unit.pr_period$Group)) {
+  for (j in unique(Unit.pr_period$Unit)) {
         
     Unit.pr_sub <- Unit.pr_period %>% 
-      filter(Group == j)
+      filter(Unit == j)
     
     # Convert to spatial points
     pts <- st_as_sf(Unit.pr_sub,
