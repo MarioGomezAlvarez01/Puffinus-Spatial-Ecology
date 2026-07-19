@@ -68,7 +68,7 @@ library(grec)
 Sys.setlocale("LC_TIME", "English")
 
 # Set working directory with raw files
-wd <- ''
+wd <- here::here()
 setwd(wd)
 
 # Define utility function
