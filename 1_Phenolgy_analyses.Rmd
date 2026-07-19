@@ -306,10 +306,10 @@ print(timeline_plot)
 
 ```{r export}
 # Export summary table
-write_tsv(summary_table, "phenology_estimates.tsv")
+write_tsv(summary_table, "outputs/phenology_estimates.tsv")
 
 # Save visualization
-ggsave("timeline_lunar_cycles.png", timeline_plot, width = 10, height = 6, dpi = 600)
+ggsave("outputs/timeline_lunar_cycles.png", timeline_plot, width = 10, height = 6, dpi = 600)
 
 ```
 
