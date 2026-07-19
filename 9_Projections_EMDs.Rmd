@@ -202,7 +202,7 @@ ocean.r <- raster(
   xmn = xmin, xmx = xmax,
   ymn = ymin, ymx = ymax,
   res = resolution,
-  crs = CRS(CRS_GEO)
+  crs = CRS("EPSG:4326")
 )
 
 # Get land polygons from rnaturalearth
