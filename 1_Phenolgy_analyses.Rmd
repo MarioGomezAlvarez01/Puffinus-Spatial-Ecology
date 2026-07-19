@@ -29,7 +29,7 @@ packages <- c('readxl', 'readr', 'stringr', 'lubridate', 'ggplot2',
 
 invisible(lapply(packages, library, character.only = TRUE))
 
-Data <- read.csv("Phen_data.csv")
+Data <- read.csv("data/Phen_data.csv")
 
 ```
 
