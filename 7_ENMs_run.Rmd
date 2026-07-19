@@ -131,9 +131,9 @@ plot(varclus_plot, cex = 0.8, main = "Non-Breeding Season - Variable Clustering"
 sim_matrix <- varclus_plot$sim
 
 # Find redundant pairs (correlation > 0.8)
-redundantes <- which(sim_matrix > 0.8 & sim_matrix < 1.0, arr.ind = TRUE)
+redundant <- which(sim_matrix > 0.8 & sim_matrix < 1.0, arr.ind = TRUE)
 print("Redundant variable pairs (non-breeding):")
-print(redundantes)
+print(redundant)
 ```
 
 ### 2.4 Select Final Variables and Scale Covariates
@@ -172,7 +172,7 @@ print(predictors_scaled_nonbreeding)
 ```{r load_presence_data}
 # Load presence data at different hierarchical levels
 Population.pr <- readRDS('outputs/pres_by_population_thinned.RDS')
-Group.pr <- readRDS('outputs/pres_by_suprapopulation_thinned.RDS')
+Unit.pr <- readRDS('outputs/pres_by_unit_thinned.RDS')
 Taxa.pr <- readRDS('outputs/pres_by_sp_thinned.RDS')
 Suprataxa.pr <- readRDS('outputs/pres_by_suprataxa_thinned.RDS')
 
@@ -268,7 +268,7 @@ pop.results <- data.frame(Model = character(),
                           AUC = numeric(), 
                           stringsAsFactors = FALSE)
 
-for (i in seq_along(all.cov_list)[2]) { # [2] runs non-breeding; use seq_along(all.cov_list) for both
+for (i in seq_along(all.cov_list)) {
   
   all_cov_period <- all.cov_list[[i]]
   
@@ -352,9 +352,9 @@ rm(Pop_models, pop.results, pop.sdm, Pop_stack)
 ```{r prep_group_data}
 all.cov_list <- list()
 
-for (i in unique(Group.pr$period)) {
+for (i in unique(Unit.pr$period)) {
   
-  Group.pr_period <- Group.pr[Group.pr$period == i, ]
+Unit.pr_period <- Unit.pr[Unit.pr$period == i, ]
   
   if (i == "breeding") {
     covs <- predictors_scaled_breeding
@@ -364,15 +364,13 @@ for (i in unique(Group.pr$period)) {
   
   all.cov_list[[i]] <- list()
   
-  for (j in unique(Group.pr_period$Group)) {
-    
-    if (j == "Greece") next # Skip Greece group
-    
-    Group.pr_sub <- Group.pr_period %>% 
+  for (j in unique(Unit.pr_period$Group)) {
+        
+    Unit.pr_sub <- Unit.pr_period %>% 
       filter(Group == j)
     
     # Convert to spatial points
-    pts <- st_as_sf(Group.pr_sub,
+    pts <- st_as_sf(Unit.pr_sub,
                     coords = c("Longitude", "Latitude"),
                     crs = 4326)
     
@@ -417,7 +415,7 @@ all.cov_list <- compact(all.cov_list)
 cat("Group-level dataset prepared\n")
 ```
 
-### 4.2 Run BART Models - Group Level
+### 4.2 Run BART Models - Unit Level
 
 ```{r run_group_models, cache=TRUE}
 
@@ -470,7 +468,7 @@ for (i in seq_along(all.cov_list)) {
     un.results <- rbind(un.results, data.frame(Model = paste0(un, '_', p), AUC = auc))
     
     # Store model
-    Unit_models[paste0(gp, "_", p)] <- list(un.sdm)
+    Unit_models[paste0(un, "_", p)] <- list(un.sdm)
     
     # Make predictions
     Unit_prediction <- predict(
