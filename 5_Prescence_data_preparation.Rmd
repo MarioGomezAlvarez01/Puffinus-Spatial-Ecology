@@ -30,7 +30,7 @@ This analysis prepares presence datasets for Environmental Niche Modeling (ENM) 
 1. Generating presences from KDE-based simulated distributions. This follows a similar approach than Morera-Pujol et al. (2022) 
 2. Applying hierarchical weighting at multiple levels:
    - **Population level** (`w_pop`): Proportional to population size within species
-   - **Group level** (`w_group`): Proportional to population size within biogeographical units
+   - **Unit level** (`w_unit`): Proportional to population size within biogeographical units
    - **Taxa level** (`w_sp`): Proportional to taxa abundance
 
 The resulting datasets are thinned to reflect these weights, ensuring balanced representation across taxonomic and geographic scales.
@@ -165,7 +165,7 @@ mask_inv_2[is.na(r_mask_gen)] <- 0
 
 ---
 
-# Population and Group Sizes
+# Population and Unit Sizes
 
 ## Define Population-Level Data
 
@@ -192,10 +192,10 @@ pop_sizes <- pop_sizes %>%
 knitr::kable(pop_sizes, caption = "Population sizes and weights (w_pop) by species")
 ```
 
-## Define Geographic Group Data
+## Define Geographic Unit Data
 
-```{r group-sizes}
-group_sizes <- as.data.frame(matrix(
+```{r unit-sizes}
+unit_sizes <- as.data.frame(matrix(
   c(
     c('Ibiza', 'Mallorca', 'Minorca', 'France', 
       'Sardinia', 'Malta', 'Croatia', 'Greece'),
@@ -207,14 +207,14 @@ group_sizes <- as.data.frame(matrix(
   nrow = 8, ncol = 3
 ))
 
-group_sizes <- group_sizes %>%
+unit_sizes <- unit_sizes %>%
   rename(Population = V1, pop_size = V2, Group = V3) %>%
   mutate(pop_size = as.numeric(pop_size)) %>%
   group_by(Group) %>%
-  mutate(w_group = pop_size / sum(pop_size)) %>%
+  mutate(w_unit = pop_size / sum(pop_size)) %>%
   ungroup()
 
-knitr::kable(group_sizes, caption = "Population sizes and weights (w_group) by geographic group")
+knitr::kable(unit_sizes, caption = "Population sizes and weights (w_unit) by geographic unit")
 ```
 
 ## Define Species-Level Data
@@ -245,7 +245,7 @@ knitr::kable(sp_sizes, caption = "Species sizes and weights (w_sp)")
 
 ## Dynamic Mask Selection
 
-This function selects the appropriate spatial mask based on breeding/non-breeding period and population group:
+This function selects the appropriate spatial mask based on breeding/non-breeding period and population unit:
 
 ```{r get-mask-function}
 get_mask <- function(gr, breeding = TRUE) {
@@ -378,9 +378,9 @@ for (p in c("breeding", "non-breeding")) {
     # Skip trips with insufficient observations
     if (nrow(trip_df) < desired_n) next
     
-    # Get group and select appropriate mask
-    gr <- unique(trip_df$Group)
-    mask_use <- get_mask(gr, p == "breeding")
+    # Get unit and select appropriate mask
+    un <- unique(trip_df$Group)
+    mask_use <- get_mask(un, p == "breeding")
     
     # Sample points from KDE
     pts <- sample_kde_weighted(
@@ -394,7 +394,7 @@ for (p in c("breeding", "non-breeding")) {
       pts |> mutate(
         geo_trip = trip,
         Population = unique(trip_df$Population),
-        Group = gr,
+        Unit = un,
         Sp = unique(trip_df$Sp),
         period = p
       )
@@ -434,27 +434,27 @@ taxa_df <- pres_df %>%
 cat("After population-level thinning:", nrow(taxa_df), "points\n")
 ```
 
-## Level 2: Geographic Group Weighting (`w_group`)
+## Level 2: Geographic Unit Weighting (`w_unit`)
 
-Ensure representation of each geographic group is proportional to its population size:
+Ensure representation of each geographic unit is proportional to its population size:
 
-```{r thinning-group}
-group_df <- pres_df %>%
-  # Join group-level weights
+```{r thinning-unit}
+unit_df <- pres_df %>%
+  # Join unit-level weights
   left_join(
-    group_sizes %>% dplyr::select(Population, Group, w_group),
-    by = c("Population", "Group")
+    unit_sizes %>% dplyr::select(Population, Unit, w_unit),
+    by = c("Population", "Unit")
   ) %>%
-  # Group by period, geographic group, and population
-  group_by(period, Group, Population) %>%
+  # Group by period, geographic unit, and population
+  group_by(period, Unit, Population) %>%
   group_modify(~ {
-    # Calculate target sample size based on group weight
-    target <- ceiling(nrow(.x) * unique(.x$w_group))
+    # Calculate target sample size based on unit weight
+    target <- ceiling(nrow(.x) * unique(.x$w_unit))
     thinning_weighted(.x, target)
   }) %>%
   ungroup()
 
-cat("After group-level thinning:", nrow(group_df), "points\n")
+cat("After unit-level thinning:", nrow(unit_df), "points\n")
 ```
 
 ## Level 3: Species-Level Weighting (`w_sp`)
@@ -492,9 +492,9 @@ print(taxa_df %>%
   group_by(period, Sp) %>%
   summarize(n_points = n(), .groups = "drop"))
 
-cat("\n2. GROUP LEVEL (group_df):\n")
+cat("\n2. UNIT LEVEL (unit_df):\n")
 print(group_df %>%
-  group_by(period, Group) %>%
+  group_by(period, Unit) %>%
   summarize(n_points = n(), .groups = "drop"))
 
 cat("\n3. SPECIES LEVEL (suprataxa_df):\n")
@@ -520,14 +520,14 @@ saveRDS(pres_df_export,
 
 cat("✓ Saved: pres_by_population_thinned.RDS\n")
 
-# Geographic group-level data
-group_df_export <- group_df %>%
-  dplyr::select(Longitude, Latitude, geo_trip, Group, period)
+# Geographic unit-level data
+unit_df_export <- unit_df %>%
+  dplyr::select(Longitude, Latitude, geo_trip, Unit, period)
 
-saveRDS(group_df_export,
-        file.path("outputs/pres_by_suprapopulation_thinned.RDS"))
+saveRDS(unit_df_export,
+        file.path("outputs/pres_by_unit_thinned.RDS"))
 
-cat("✓ Saved: pres_by_suprapopulation_thinned.RDS\n")
+cat("✓ Saved: pres_by_unit_thinned.RDS\n")
 
 # Species-level data
 taxa_df_export <- taxa_df %>%
