@@ -417,7 +417,7 @@ cat("Group-level dataset prepared\n")
 
 ### 4.2 Run BART Models - Unit Level
 
-```{r run_group_models, cache=TRUE}
+```{r run_unit_models, cache=TRUE}
 
 path.out.unit <- "outputs/Unit_ENMs"
 
@@ -647,12 +647,12 @@ for (i in seq_along(all.cov_list)) {
   
   # Save predictions
   writeRaster(Tx_stack, 
-              filename = paste0(path.out.tx, "Taxa_pred_", p, ".tif"), 
+              filename = paste0(path.out.tx, "/Taxa_pred_", p, ".tif"), 
               overwrite = TRUE)
   
   # Save models
   saveRDS(Tx_models, 
-          file = paste0(path.out.tx, "Taxa_pred_models_", p, ".RDS"))
+          file = paste0(path.out.tx, "/Taxa_pred_models_", p, ".RDS"))
   
   Tx_stack <- stack()
   Tx_models <- list()
@@ -660,7 +660,7 @@ for (i in seq_along(all.cov_list)) {
 
 # Save results summary
 write.csv(tx.results, 
-          paste0(path.out.tx, "Taxa_summary.csv"), 
+          paste0(path.out.tx, "/Taxa_summary.csv"), 
           row.names = FALSE)
 
 cat("Taxa models completed\n")
