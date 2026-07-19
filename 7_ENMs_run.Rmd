@@ -1,0 +1,803 @@
+---
+title: "Environmental Niche Models (ENMs)"
+author: "Mario Gómez Álvarez"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: show
+    theme: flatly
+---
+
+# ENM Workflow
+
+This script implements ENMs using BART (Bayesian Additive Regression Trees) at multiple hierarchical levels: Population, Biogeographic unit, Taxa, and Supra-taxa (Mediterranean Puffinus shearwaters).
+
+---
+
+## 1. Setup and Landmask Creation
+
+### 1.1 Load Libraries
+
+```{r setup, message=FALSE, warning=FALSE}
+packages <- c(
+  "rnaturalearth", "rworldmap", "rworldmap",
+  "grid", "terra", "adehabitatHR", "sf", 
+  "sp", "geosphere", "wordcloud", "gdistance",
+  "rasterVis", "RColorBrewer",
+  "purrr", "Hmisc", "embarcadero"
+  )
+
+invisible(lapply(packages, library, character.only = TRUE))
+```
+
+### 1.2 Create Landmask
+
+```{r landmask}
+# 1. Create world land vector
+world <- ne_countries(scale = 50, returnclass = "sf")
+world_vect <- vect(world)
+
+# 2. Template raster
+template <- rast(
+  xmin = -15, xmax = 42,
+  ymin = 28, ymax = 51,
+  resolution = 0.25,
+  crs = "EPSG:4326"
+)
+
+# 3. Effective mask design:
+# Rasterize land with value 1
+r_land <- rasterize(world_vect, template, field = 1)
+
+# Create sea mask: 
+# Where there is NO land (is.na), we put 1. Where there IS land, we put NA.
+r_mask <- is.na(r_land) 
+r_mask[r_mask == 0] <- NA # Convert 0s (land) to real NA
+plot(r_mask, main = "Sea Mask (1 = Sea, NA = Land)")
+```
+
+---
+
+## 2. Load and Process Covariates
+
+### 2.1 Set Working Directory and Load Data
+
+```{r load_data}
+# Load breeding season covariates
+predictors_original_breeding <- rast(list.files(
+  'breeding_climatology',
+  pattern = ".tif", 
+  full.names = TRUE
+))
+
+# Assign layer names
+names(predictors_original_breeding) <- c(
+  "BATH", "CHLa_mean", "CHLa_sd", "CHLag_mean",
+  "CHLag_sd", "gIUV_mean", "gIUV_sd",
+  "MLD_mean", "MLD_sd", "NPP_mean",
+  "NPP_sd", "NPPg_mean", "NPPg_sd", "SLOPE",
+  "SSH_mean", "SSH_sd", "SSS_mean", "SSS_sd",
+  "SSSg_mean", "SSSg_sd", "SST_mean", "SST_sd",
+  "SSTg_mean", "SSTg_sd", "Wind_mean", "Wind_sd"
+)
+
+# Load non-breeding season covariates
+predictors_original_nonbreeding <- rast(list.files(
+  'nonbreeding_climatology',
+  pattern = ".tif", 
+  full.names = TRUE
+))
+
+# Assign layer names
+names(predictors_original_nonbreeding) <- c(
+  "BATH", "CHLa_mean", "CHLa_sd", "CHLag_mean",
+  "CHLag_sd", "gIUV_mean", "gIUV_sd",
+  "MLD_mean", "MLD_sd", "NPP_mean",
+  "NPP_sd", "NPPg_mean", "NPPg_sd", "SLOPE",
+  "SSH_mean", "SSH_sd", "SSS_mean", "SSS_sd",
+  "SSSg_mean", "SSSg_sd", "SST_mean", "SST_sd",
+  "SSTg_mean", "SSTg_sd", "Wind_mean", "Wind_sd"
+)
+```
+
+### 2.2 Multicollinearity Analysis - Breeding Season
+
+```{r multicollinearity_breeding}
+# Create correlation matrix using Spearman similarity
+v <- as.formula(paste("~", paste(names(predictors_original_breeding), collapse = "+")))
+varclus_plot <- varclus(v, similarity = "spearman", data = predictors_original_breeding)
+plot(varclus_plot, cex = 0.8, main = "Breeding Season - Variable Clustering")
+
+# Extract similarity matrix
+sim_matrix <- varclus_plot$sim
+
+# Find redundant pairs (correlation > 0.8)
+redundantes <- which(sim_matrix > 0.8 & sim_matrix < 1.0, arr.ind = TRUE)
+print("Redundant variable pairs (breeding):")
+print(redundantes)
+```
+
+### 2.3 Multicollinearity Analysis - Non-Breeding Season
+
+```{r multicollinearity_nonbreeding}
+# Create correlation matrix using Spearman similarity
+v <- as.formula(paste("~", paste(names(predictors_original_nonbreeding), collapse = "+")))
+varclus_plot <- varclus(v, similarity = "spearman", data = predictors_original_nonbreeding)
+plot(varclus_plot, cex = 0.8, main = "Non-Breeding Season - Variable Clustering")
+
+# Extract similarity matrix
+sim_matrix <- varclus_plot$sim
+
+# Find redundant pairs (correlation > 0.8)
+redundantes <- which(sim_matrix > 0.8 & sim_matrix < 1.0, arr.ind = TRUE)
+print("Redundant variable pairs (non-breeding):")
+print(redundantes)
+```
+
+### 2.4 Select Final Variables and Scale Covariates
+
+```{r select_and_scale_covariates}
+# Define final selected variables
+final_vars <- c(
+  "NPP_mean", "NPPg_mean", "SST_mean", "SST_sd", "SSTg_mean", 
+  "SSS_mean", "SSSg_mean", "MLD_mean", "SSH_mean", "SSH_sd", 
+  "gIUV_mean", "Wind_mean", "Wind_sd", "BATH", "SLOPE"
+)
+
+# Create pattern for filtering
+patern <- paste(final_vars, collapse = "|")
+
+# Filter and prepare breeding covariates
+predictors_original_breeding <- predictors_original_breeding[[grepl(patern, names(predictors_original_breeding))]]
+predictors_original_breeding <- terra::mask(predictors_original_breeding, r_mask)
+predictors_scaled_breeding <- scale(predictors_original_breeding)
+
+# Filter and prepare non-breeding covariates
+predictors_original_nonbreeding <- predictors_original_nonbreeding[[final_vars]]
+predictors_original_nonbreeding <- terra::mask(predictors_original_nonbreeding, r_mask)
+predictors_scaled_nonbreeding <- scale(predictors_original_nonbreeding)
+
+cat("Final variables selected:\n")
+print(final_vars)
+cat("\nBreeding predictor stack:\n")
+print(predictors_scaled_breeding)
+cat("\nNon-breeding predictor stack:\n")
+print(predictors_scaled_nonbreeding)
+```
+
+### 2.5 Load Presence Data
+
+```{r load_presence_data}
+# Load presence data at different hierarchical levels
+Population.pr <- readRDS('outputs/pres_by_population_thinned.RDS')
+Group.pr <- readRDS('outputs/pres_by_suprapopulation_thinned.RDS')
+Taxa.pr <- readRDS('outputs/pres_by_sp_thinned.RDS')
+Suprataxa.pr <- readRDS('outputs/pres_by_suprataxa_thinned.RDS')
+
+cat("Presence data loaded successfully\n")
+```
+
+---
+
+## 3. Population Level Models
+
+### 3.1 Prepare Dataset - Population Level
+
+```{r prep_population_data}
+
+all.cov_list <- list()
+
+for (i in unique(Population.pr$period)) {
+  
+  Population.pr_period <- Population.pr[Population.pr$period == i, ]
+  
+  if (i == "breeding") {
+    covs <- predictors_scaled_breeding
+  } else {
+    covs <- predictors_scaled_nonbreeding
+  }
+  
+  all.cov_list[[i]] <- list()
+  
+  for (j in unique(Population.pr_period$Population)) {
+    
+    Population.pr_sub <- Population.pr_period %>% 
+      filter(Population == j)
+    
+    # Convert to spatial points
+    pts <- st_as_sf(Population.pr_sub,
+                    coords = c("Longitude", "Latitude"),
+                    crs = 4326)
+    
+    # Get cell IDs
+    pts$cell_id <- cellFromXY(covs$BATH, st_coordinates(pts))
+    
+    # Remove duplicates within cells
+    pts_unique <- pts %>%
+      filter(!is.na(cell_id)) %>%
+      group_by(cell_id) %>%
+      slice(1) %>%
+      ungroup()
+    
+    # Extract presence covariates
+    pres.cov <- terra::extract(covs, vect(pts_unique))
+    pres.cov$pres <- 1
+    
+    # Generate random absences
+    masked_bath <- terra::mask(covs$BATH, r_mask)
+    
+    absences <- spatSample(
+      masked_bath,
+      size = nrow(pres.cov),
+      method = "random",
+      na.rm = TRUE,
+      xy = TRUE
+    )
+    
+    # Extract absence covariates
+    abs.cov <- terra::extract(covs, absences[, 1:2])
+    abs.cov$pres <- 0
+    
+    # Combine presence and absence data
+    all.cov <- rbind(pres.cov, abs.cov)
+    all.cov2 <- all.cov %>% drop_na()
+    
+    all.cov_list[[i]][[j]] <- all.cov2
+  }
+}
+
+all.cov_list <- compact(all.cov_list)
+cat("Population-level dataset prepared\n")
+```
+
+### 3.2 Run BART Models - Population Level
+
+```{r run_population_models, cache=TRUE}
+
+path.out.pop <- "outputs/Pop_ENMs"
+
+if (!dir.exists(path.out.pop)) {
+  dir.create(path.out.pop, recursive = TRUE)
+}
+
+Pop_models <- list()
+Pop_stack <- stack()
+pop.results <- data.frame(Model = character(), 
+                          AUC = numeric(), 
+                          stringsAsFactors = FALSE)
+
+for (i in seq_along(all.cov_list)[2]) { # [2] runs non-breeding; use seq_along(all.cov_list) for both
+  
+  all_cov_period <- all.cov_list[[i]]
+  
+  for (j in seq_along(all_cov_period)) {
+    
+    pop <- names(all_cov_period)[j]
+    if (i == 1) p <- "breeding" else p <- "non-breeding"
+    
+    if (p == "breeding") {
+      covs <- predictors_scaled_breeding
+    } else {
+      covs <- predictors_scaled_nonbreeding
+    }
+    
+    cat(paste("Running model:", pop, p, "\n"))
+    
+    all_cov_sub <- as.data.frame(all_cov_period[[j]])
+    xvars <- names(covs)
+    
+    # Run BART model with automatic variable selection
+    pop.sdm <- bart.step(
+      x.data = all_cov_sub[, xvars],
+      y.data = all_cov_sub[, 'pres'],
+      full = TRUE,
+      quiet = TRUE
+    )
+    
+    # Calculate AUC
+    fitobj <- pop.sdm$fit
+    true.vector <- fitobj$data@y 
+    pred <- prediction(colMeans(pnorm(pop.sdm$yhat.train)), true.vector)
+    auc <- performance(pred, "auc")@y.values[[1]]
+    
+    pop.results <- rbind(pop.results, 
+                         data.frame(Model = paste0(pop, '_', p), 
+                                    AUC = auc))
+    
+    # Store model
+    Pop_models[paste0(pop, "_", p)] <- list(pop.sdm)
+    
+    # Make predictions
+    Pop_prediction <- predict(
+      object = pop.sdm,
+      x.layers = stack(covs),
+      quantiles = c(0.5),
+      splitby = 20,
+      quiet = TRUE
+    )
+    
+    # Stack predictions
+    Pop_stack <- stack(Pop_stack, Pop_prediction[[1]])
+  }
+  
+  # Save predictions
+  writeRaster(Pop_stack,
+              filename = paste0(path.out.pop, "/Population_pred_", p, ".tif"), 
+              overwrite = TRUE)
+  # Save models
+  saveRDS(Pop_models, 
+          file = paste0(path.out.pop, "/Population_models_", p, ".RDS"))
+  
+  Pop_stack <- stack()
+  Pop_models <- list()
+}
+
+# Save results summary
+write.csv(pop.results, 
+          paste0(path.out.pop, "/Population_summary.csv"), 
+          row.names = FALSE)
+
+cat("Population models completed\n")
+rm(Pop_models, pop.results, pop.sdm, Pop_stack)
+```
+
+---
+
+## 4. Biogeographic Group Level Models
+
+### 4.1 Prepare Dataset - Group Level
+
+```{r prep_group_data}
+all.cov_list <- list()
+
+for (i in unique(Group.pr$period)) {
+  
+  Group.pr_period <- Group.pr[Group.pr$period == i, ]
+  
+  if (i == "breeding") {
+    covs <- predictors_scaled_breeding
+  } else {
+    covs <- predictors_scaled_nonbreeding
+  }
+  
+  all.cov_list[[i]] <- list()
+  
+  for (j in unique(Group.pr_period$Group)) {
+    
+    if (j == "Greece") next # Skip Greece group
+    
+    Group.pr_sub <- Group.pr_period %>% 
+      filter(Group == j)
+    
+    # Convert to spatial points
+    pts <- st_as_sf(Group.pr_sub,
+                    coords = c("Longitude", "Latitude"),
+                    crs = 4326)
+    
+    # Get cell IDs
+    pts$cell_id <- cellFromXY(covs$BATH, st_coordinates(pts))
+    
+    # Remove duplicates within cells
+    pts_unique <- pts %>%
+      filter(!is.na(cell_id)) %>%
+      group_by(cell_id) %>%
+      slice(1) %>%
+      ungroup()
+    
+    # Extract presence covariates
+    pres.cov <- terra::extract(covs, vect(pts_unique))
+    pres.cov$pres <- 1
+    
+    # Generate random absences
+    masked_bath <- terra::mask(covs$BATH, r_mask)
+    
+    absences <- spatSample(
+      masked_bath,
+      size = nrow(pres.cov),
+      method = "random",
+      na.rm = TRUE,
+      xy = TRUE
+    )
+    
+    # Extract absence covariates
+    abs.cov <- terra::extract(covs, absences[, 1:2])
+    abs.cov$pres <- 0
+    
+    # Combine presence and absence data
+    all.cov <- rbind(pres.cov, abs.cov)
+    all.cov2 <- all.cov %>% drop_na()
+    
+    all.cov_list[[i]][[j]] <- all.cov2
+  }
+}
+
+all.cov_list <- compact(all.cov_list)
+cat("Group-level dataset prepared\n")
+```
+
+### 4.2 Run BART Models - Group Level
+
+```{r run_group_models, cache=TRUE}
+
+path.out.unit <- "outputs/Unit_ENMs"
+
+if (!dir.exists(path.out.unit)) {
+  dir.create(path.out.unit, recursive = TRUE)
+}
+
+Unit_stack <- stack()
+Unit_models <- list()
+un.results <- data.frame(Model = character(), 
+                         AUC = numeric(), 
+                         stringsAsFactors = FALSE)
+
+for (i in seq_along(all.cov_list)) {
+  
+  all_cov_period <- all.cov_list[[i]]
+  
+  for (j in seq_along(all_cov_period)) {
+    
+    un <- names(all_cov_period)[j]
+    if (i == 1) p <- "breeding" else p <- "non-breeding"
+    
+    if (p == "breeding") {
+      covs <- predictors_scaled_breeding
+    } else {
+      covs <- predictors_scaled_nonbreeding
+    }
+    
+    cat(paste("Running model:", un, p, "\n"))
+    
+    all_cov_sub <- as.data.frame(all_cov_period[[j]])
+    xvars <- names(covs)
+    
+    # Run BART model
+    un.sdm <- bart.step(
+      x.data = all_cov_sub[, xvars],
+      y.data = all_cov_sub[, 'pres'],
+      full = TRUE,
+      quiet = TRUE
+    )
+    
+    # Calculate AUC
+    fitobj <- un.sdm$fit
+    true.vector <- fitobj$data@y 
+    pred <- prediction(colMeans(pnorm(un.sdm$yhat.train)), true.vector)
+    auc <- performance(pred, "auc")@y.values[[1]]
+    
+    un.results <- rbind(un.results, data.frame(Model = paste0(un, '_', p), AUC = auc))
+    
+    # Store model
+    Unit_models[paste0(gp, "_", p)] <- list(un.sdm)
+    
+    # Make predictions
+    Unit_prediction <- predict(
+      object = un.sdm,
+      x.layers = stack(covs),
+      quantiles = c(0.5),
+      splitby = 20,
+      quiet = TRUE
+    )
+    
+    # Stack predictions
+    Unit_stack <- stack(Unit_stack, Unit_prediction[[1]])
+  }
+  
+  # Save predictions
+  writeRaster(Unit_stack, 
+              filename = paste0(path.out.unit, "/Unit_pred_", p, ".tif"), 
+              overwrite = TRUE)
+  
+  # Save models
+  saveRDS(Unit_models, 
+          file = paste0(path.out.unit, "/Unit_pred_models_", p, ".RDS"))
+  
+  Unit_stack <- stack()
+  Unit_models <- list()
+}
+
+# Save results summary
+write.csv(un.results, 
+          paste0(path.out.unit, "/Unit_summary.csv"), 
+          row.names = FALSE)
+
+cat("Group models completed\n")
+rm(Unit_models, un.results, un.sdm, Unit_stack)
+```
+
+---
+
+## 5. Taxa (Species) Level Models
+
+### 5.1 Prepare Dataset - Taxa Level
+
+```{r prep_taxa_data}
+all.cov_list <- list()
+
+for (i in unique(Taxa.pr$period)) {
+  
+  Taxa.pr_period <- Taxa.pr[Taxa.pr$period == i, ]
+  
+  if (i == "breeding") {
+    covs <- predictors_scaled_breeding
+  } else {
+    covs <- predictors_scaled_nonbreeding
+  }
+  
+  all.cov_list[[i]] <- list()
+  
+  for (j in unique(Taxa.pr_period$Sp)) {
+    
+    Taxa.pr_sub <- Taxa.pr_period %>% 
+      filter(Sp == j)
+    
+    # Convert to spatial points
+    pts <- st_as_sf(Taxa.pr_sub,
+                    coords = c("Longitude", "Latitude"),
+                    crs = 4326)
+    
+    # Get cell IDs
+    pts$cell_id <- cellFromXY(covs$BATH, st_coordinates(pts))
+    
+    # Remove duplicates within cells
+    pts_unique <- pts %>%
+      filter(!is.na(cell_id)) %>%
+      group_by(cell_id) %>%
+      slice(1) %>%
+      ungroup()
+    
+    # Extract presence covariates
+    pres.cov <- terra::extract(covs, vect(pts_unique))
+    pres.cov$pres <- 1
+    
+    # Generate random absences
+    masked_bath <- terra::mask(covs$BATH, r_mask)
+    
+    absences <- spatSample(
+      masked_bath,
+      size = nrow(pres.cov),
+      method = "random",
+      na.rm = TRUE,
+      xy = TRUE
+    )
+    
+    # Extract absence covariates
+    abs.cov <- terra::extract(covs, absences[, 1:2])
+    abs.cov$pres <- 0
+    
+    # Combine presence and absence data
+    all.cov <- rbind(pres.cov, abs.cov)
+    all.cov2 <- all.cov %>% drop_na()
+    
+    all.cov_list[[i]][[j]] <- all.cov2
+  }
+}
+
+all.cov_list <- compact(all.cov_list)
+cat("Taxa-level dataset prepared\n")
+```
+
+### 5.2 Run BART Models - Taxa Level
+
+```{r run_taxa_models, cache=TRUE}
+
+path.out.tx <- "outputs/Taxa_ENMs"
+
+if (!dir.exists(path.out.tx)) {
+  dir.create(path.out.tx, recursive = TRUE)
+}
+
+Tx_stack <- stack()
+Tx_models <- list()
+tx.results <- data.frame(Model = character(), 
+                         AUC = numeric(), 
+                         stringsAsFactors = FALSE)
+
+for (i in seq_along(all.cov_list)) {
+  
+  all_cov_period <- all.cov_list[[i]]
+  
+  for (j in seq_along(all_cov_period)) {
+    
+    tx <- names(all_cov_period)[j]
+    if (i == 1) p <- "breeding" else p <- "non-breeding"
+    
+    if (p == "breeding") {
+      covs <- predictors_scaled_breeding
+    } else {
+      covs <- predictors_scaled_nonbreeding
+    }
+    
+    cat(paste("Running model:", tx, p, "\n"))
+    
+    all_cov_sub <- as.data.frame(all_cov_period[[j]])
+    xvars <- names(covs)
+    
+    # Run BART model
+    tx.sdm <- bart.step(
+      x.data = all_cov_sub[, xvars],
+      y.data = all_cov_sub[, 'pres'],
+      full = TRUE,
+      quiet = TRUE
+    )
+    
+    # Calculate AUC
+    fitobj <- tx.sdm$fit
+    true.vector <- fitobj$data@y 
+    pred <- prediction(colMeans(pnorm(tx.sdm$yhat.train)), true.vector)
+    auc <- performance(pred, "auc")@y.values[[1]]
+    
+    tx.results <- rbind(tx.results, data.frame(Model = paste0(tx, '_', p), AUC = auc))
+    
+    # Store model
+    Tx_models[paste0(tx, "_", p)] <- list(tx.sdm)
+    
+    # Make predictions
+    Sp_prediction <- predict(
+      object = tx.sdm,
+      x.layers = stack(covs),
+      quantiles = c(0.5),
+      splitby = 20,
+      quiet = TRUE
+    )
+    
+    # Stack predictions
+    Tx_stack <- stack(Tx_stack, Sp_prediction[[1]])
+  }
+  
+  # Save predictions
+  writeRaster(Tx_stack, 
+              filename = paste0(path.out.tx, "Taxa_pred_", p, ".tif"), 
+              overwrite = TRUE)
+  
+  # Save models
+  saveRDS(Tx_models, 
+          file = paste0(path.out.tx, "Taxa_pred_models_", p, ".RDS"))
+  
+  Tx_stack <- stack()
+  Tx_models <- list()
+}
+
+# Save results summary
+write.csv(tx.results, 
+          paste0(path.out.tx, "Taxa_summary.csv"), 
+          row.names = FALSE)
+
+cat("Taxa models completed\n")
+rm(Tx_models, tx.results, tx.sdm, Tx_stack)
+```
+
+---
+
+## 6. Supra-Taxa Level Models
+
+### 6.1 Prepare Dataset - Supra-Taxa Level
+
+```{r prep_suprataxa_data}
+all.cov_list <- list()
+
+for (i in unique(Suprataxa.pr$period)) {
+  
+  Suprataxa.pr_period <- Suprataxa.pr[Suprataxa.pr$period == i, ]
+  
+  if (i == "breeding") {
+    covs <- predictors_scaled_breeding
+  } else {
+    covs <- predictors_scaled_nonbreeding
+  }
+  
+  # Convert to spatial points
+  pts <- st_as_sf(Suprataxa.pr_period,
+                  coords = c("Longitude", "Latitude"),
+                  crs = 4326)
+  
+  # Get cell IDs
+  pts$cell_id <- cellFromXY(covs$BATH, st_coordinates(pts))
+  
+  # Remove duplicates within cells
+  pts_unique <- pts %>%
+    filter(!is.na(cell_id)) %>%
+    group_by(cell_id) %>%
+    slice(1) %>%
+    ungroup()
+  
+  # Extract presence covariates
+  pres.cov <- terra::extract(covs, vect(pts_unique))
+  pres.cov$pres <- 1
+  
+  # Generate random absences
+  masked_bath <- terra::mask(covs$BATH, r_mask)
+  
+  absences <- spatSample(
+    masked_bath,
+    size = nrow(pres.cov),
+    method = "random",
+    na.rm = TRUE,
+    xy = TRUE
+  )
+  
+  # Extract absence covariates
+  abs.cov <- terra::extract(covs, absences[, 1:2])
+  abs.cov$pres <- 0
+  
+  # Combine presence and absence data
+  all.cov <- rbind(pres.cov, abs.cov)
+  all.cov2 <- all.cov %>% drop_na()
+  
+  all.cov_list[[i]] <- all.cov2
+}
+
+cat("Supra-taxa dataset prepared\n")
+```
+
+### 6.2 Run BART Models - Supra-Taxa Level
+
+```{r run_suprataxa_models, cache=TRUE}
+
+path.out.st <- "outputs/Supra-taxa_ENMs"
+
+if (!dir.exists(path.out.st)) {
+  dir.create(path.out.st, recursive = TRUE)
+}
+
+Supra_models <- list()
+supra.results <- data.frame(Model = character(), 
+                            AUC = numeric(), 
+                            stringsAsFactors = FALSE)
+
+for (i in seq_along(all.cov_list)) {
+  
+  all_cov_period <- as.data.frame(all.cov_list[[i]])
+  
+  if (i == 1) p <- "breeding" else p <- "non-breeding"
+  
+  if (p == "breeding") {
+    covs <- predictors_scaled_breeding
+  } else {
+    covs <- predictors_scaled_nonbreeding
+  }
+  
+  sp <- "Supra-taxa"
+  cat(paste("Running model:", sp, p, "\n"))
+  
+  xvars <- names(covs)
+  
+  # Run BART model
+  sp.sdm <- bart.step(
+    x.data = all_cov_period[, xvars],
+    y.data = all_cov_period[, 'pres'],
+    full = TRUE,
+    quiet = FALSE
+  )
+  
+  # Calculate AUC
+  fitobj <- sp.sdm$fit
+  true.vector <- fitobj$data@y 
+  pred <- prediction(colMeans(pnorm(sp.sdm$yhat.train)), true.vector)
+  auc <- performance(pred, "auc")@y.values[[1]]
+  
+  supra.results <- rbind(supra.results, data.frame(Model = paste0(sp, '_', p), AUC = auc))
+  
+  # Store model
+  Supra_models[paste0(sp, "_", p)] <- list(sp.sdm)
+}
+
+# Save models
+saveRDS(Supra_models, 
+        file = paste0(path.out.st, "/Suprataxa_models.RDS"))
+
+# Save results summary
+write.csv(supra.results, 
+          paste0(path.out.st, "/Suprataxa_summary.csv"), 
+          row.names = FALSE)
+
+cat("Supra-taxa models completed\n")
+```
+
+# Session Information
+
+```{r session-info}
+sessionInfo()
+```
