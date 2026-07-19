@@ -137,7 +137,7 @@ assign_period <- function(tracks, phenology) {
 
 ```{r data-load}
 # Load trip data and define biogeographic groups
-trips <- read.csv("all_trips.csv") %>%
+trips <- read.csv("data/all_trips.csv") %>%
   mutate(Group = case_when(
     Population %in% c('Ibiza', 'Mallorca','Minorca') ~ 'WesternMost',
     Population %in% c('France', 'Sardinia') ~ 'Central-West',
@@ -147,12 +147,12 @@ trips <- read.csv("all_trips.csv") %>%
   )) 
 
 # Load phenology to extract breeding and non-breeding positions
-phen <- read.csv("Phen_data.csv")
+phen <- read.csv("data/Phen_data.csv")
 
 trips2 <- assign_period(trips,phen)
 
 # Save data for posterior analyses
-write.csv(trips2%>%select(Colony:year_dep,period),"all_trips_classified.csv",row.names = F)
+write.csv(trips2%>%select(Colony:year_dep,period),"outputs/all_trips_classified.csv",row.names = F)
 
 ```
 
@@ -266,7 +266,7 @@ wrld <- rworldmap::getMap(resolution = "high")
 sf_wrld <- st_as_sf(wrld) %>% st_transform(CRS_PROJ)
 
 # Colonies coordinates
-colonies <- read.csv('colonies_coords.csv')
+colonies <- read.csv('data/colonies_coords.csv')
 
 # Convert to sf object
 origin_sf <- st_as_sf(colonies, coords = c("Lon", "Lat"), crs = CRS_PROJ)
@@ -362,20 +362,15 @@ p <- ggplot() +
   # Layer 2: Base map
   geom_sf(data = sf_wrld, fill = "gray60", color = "black", linewidth = 0.1) +
 
-  # Layer 3: Círculos normales (Usamos color normal mapeado a Pop, sin formas raras)
+  # Layer 3: Individual tracks
   geom_sf(data = individual_k5, aes(color = Pop), size = 1.2, alpha = 0.7, show.legend = FALSE) +
   
-  # Layer 4: Triángulos originales (Todos con borde negro fino, como los tenías)
+  # Layer 4: Breeding colonies
   geom_sf(data = origin_sf, aes(fill = Pop), size = 3, shape = 24, color = "black", stroke = 0.5) +
 
-  # ==========================================
-  # ¡AQUÍ ESTÁ EL TRUCO PARA MENORCA!
-  # ==========================================
-  # Capa Extra 1: Solo los círculos de Menorca con borde blanco encima de los demás
+  # Layer 5 and 6: Add white contour to Minorca data
   geom_sf(data = subset(individual_k5, Pop == "Minorca"), 
           aes(fill = Pop), shape = 21, color = "white", size = 1.2, stroke = 0.7, show.legend = FALSE) +
-
-  # Capa Extra 2: Solo el triángulo de Menorca con borde blanco
   geom_sf(data = subset(origin_sf, Pop == "Minorca"), 
           aes(fill = Pop), shape = 24, color = "white", size = 3, stroke = 1.0, show.legend = FALSE) +
   # ==========================================
