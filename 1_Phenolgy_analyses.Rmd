@@ -38,20 +38,20 @@ Data <- read.csv("data/Phen_data.csv")
 ```{r julian_dates}
 # Find first full moon in April for reference
 first_full_moon_april <- function(year) {
-  fechas <- seq(as.Date(paste0(year, "-04-01"),
-                as.Date(paste0(year, "-04-30"),
+  dates <- seq(as.Date(paste0(year, "-04-01")),
+                as.Date(paste0(year, "-04-30")),
                 by = "day")
-  phases <- getMoonIllumination(fechas)
-  fechas[which.min(abs(phases$phase - 0.5))]
+  phases <- getMoonIllumination(dates)
+  dates[which.min(abs(phases$phase - 0.5))]
 }
 
 # Calculate days since first full moon in April
-calculate_julian_from_moon <- function(fecha) {
-  if (is.na(fecha)) return(NA_real_)
-  fecha <- as.Date(fecha)
-  year_val <- year(fecha)
-  luna <- first_full_moon_april(year_val)
-  as.numeric(difftime(fecha, luna, units = "days")) + 1
+calculate_julian_from_moon <- function(date) {
+  if (is.na(date)) return(NA_real_)
+  date <- as.Date(date)
+  year_val <- year(date)
+  moon <- first_full_moon_april(year_val)
+  as.numeric(difftime(date, moon, units = "days")) + 1
 }
 
 # Vectorized version
