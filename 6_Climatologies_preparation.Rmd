@@ -83,6 +83,7 @@ setwd(wd)
 
 ```{r load-files}
 # Load all NetCDF files matching pattern
+# Original .nc files are not provided. Download from the references of the overview section
 files <- list.files(path = wd, pattern = ".nc")
 cat("Found", length(files), "NetCDF files:\n")
 print(files)
@@ -107,7 +108,7 @@ Load trip data and create period-specific date ranges:
 
 ```{r load-trips}
 # Load classified trip data
-trips_all <- read_csv("all_trips_classified.csv")
+trips_all <- read_csv("outputs/all_trips_classified.csv")
 
 # Separate by breeding/non-breeding
 trips_b <- trips_all %>%
@@ -487,7 +488,7 @@ cli::cli_h2("NON-BREEDING CLIMATOLOGIES PROCESSING COMPLETE!")
 
 ---
 
-# Output Validation and Assembly
+# Output Validation
 
 ## Verify Output Files
 
@@ -511,72 +512,6 @@ print(basename(breeding_files))
 cat("\n=== NON-BREEDING CLIMATOLOGIES ===\n")
 cat("Generated", length(nonbreeding_files), "files:\n")
 print(basename(nonbreeding_files))
-```
-
-## Stack Variables by Season
-
-Create separate stacks for breeding and non-breeding predictors:
-
-```{r stack-variables-by-season}
-# ===== BREEDING STACK =====
-stack_breeding <- rast(breeding_files)
-
-cat("\n=== BREEDING PREDICTOR STACK ===\n")
-cat("Layers:", nlyr(stack_breeding), "\n")
-cat("Extent:", paste(ext(stack_breeding)), "\n")
-cat("Resolution:", res(stack_breeding)[1], "degrees\n")
-
-# ===== NON-BREEDING STACK =====
-stack_nonbreeding <- rast(nonbreeding_files)
-
-cat("\n=== NON-BREEDING PREDICTOR STACK ===\n")
-cat("Layers:", nlyr(stack_nonbreeding), "\n")
-cat("Extent:", paste(ext(stack_nonbreeding)), "\n")
-cat("Resolution:", res(stack_nonbreeding)[1], "degrees\n")
-
-# Verify geometric compatibility within each season
-cli::cli_h2("Verifying geometric compatibility...")
-
-tryCatch(
-  compareGeom(stack_breeding),
-  error = function(e) {
-    cli::cli_alert_warning("Breeding geometry mismatch detected:")
-    print(e)
-  },
-  success = function() {
-    cli::cli_alert_success("Breeding stack geometry OK")
-  }
-)
-
-tryCatch(
-  compareGeom(stack_nonbreeding),
-  error = function(e) {
-    cli::cli_alert_warning("Non-breeding geometry mismatch detected:")
-    print(e)
-  },
-  success = function() {
-    cli::cli_alert_success("Non-breeding stack geometry OK")
-  }
-)
-```
-
-## Visualize Predictor Layers by Season
-
-```{r visualize-stacks}
-# Plot breeding climatology layers
-cli::cli_h2("BREEDING CLIMATOLOGIES VISUALIZATION")
-plot(stack_breeding, maxcell = 100000, main = "Breeding Season")
-
-# Plot non-breeding climatology layers
-cli::cli_h2("NON-BREEDING CLIMATOLOGIES VISUALIZATION")
-plot(stack_nonbreeding, maxcell = 100000, main = "Non-Breeding Season")
-
-# Summary statistics
-cat("\n=== BREEDING STACK SUMMARY ===\n")
-print(summary(stack_breeding))
-
-cat("\n=== NON-BREEDING STACK SUMMARY ===\n")
-print(summary(stack_nonbreeding))
 ```
 
 # Session Information
