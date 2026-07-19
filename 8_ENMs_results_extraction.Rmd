@@ -303,3 +303,9 @@ This workflow extracts and visualizes partial response curves from the fitted EN
 ---
 
 *Last updated: `r Sys.Date()`*
+
+# Session Information
+
+```{r session-info}
+sessionInfo()
+```
