@@ -26,17 +26,11 @@ Sys.setenv(TZ = 'GMT')
 
 ## Introduction
 
-This analysis examines non-breeding spatial distributions of Mediterranean shearwaters (Balearic and Yelkouan) across eight biogeographical populations (WesternMost, Central-West, Central-East, EasternMost) and across the eight breeding populations. We employ kernel density estimation (KDE) to identify core (UD50%) and home range (UD90%) areas during the core non-breeding season (August-September).
+This analysis examines non-breeding spatial distributions of Mediterranean shearwaters (Balearic and Yelkouan) across the eight breeding populations. We employ kernel density estimation (KDE) to identify core (UD50%) and home range (UD90%) areas during the core non-breeding season (August-September).
 
 ### Data Standardization
 
-Two-step standardization procedure to prevent sampling bias:
-
-1. **Individual-level standardization**: Minimum 30 locations per individual track
-2. **Population-level standardization**: Equal number of individuals per population (n = minimum across populations)
-
-This ensures large populations do not dominate group-level kernels.
-
+**Individual-level standardization**: Minimum 30 locations per individual track
 ---
 
 # Load Libraries & Set Parameters
@@ -175,91 +169,11 @@ cat("Total records non-breeding:", nrow(trips2[trips2$period == "non-breeding",]
 cat("Individuals meeting minimum locations:", n_distinct(trips_balanced_ind$geo_trip), "\n")
 cat("Total positions after standardization:", nrow(trips_balanced_ind), "\n")
 ```
-
 ---
 
-# 3. Standardize Effort by Population
-
-```{r standardize-population}
-# Identify minimum number of individuals across populations
-min_inds <- trips_balanced_ind %>%
-  group_by(Population) %>%
-  summarise(n_ind = n_distinct(geo_trip), .groups = 'drop') %>%
-  pull(n_ind) %>%
-  min()
-
-cat("Minimum tracks per population:", min_inds, "\n\n")
-
-# Sample equal number of tracks per population but stratified by WA
-selected_ids <- trips_balanced_ind %>%
-  distinct(Population, WA, geo_trip) %>%
-  group_by(Population) %>%
-  group_modify(~{
-
-    df <- .x
-    base_sample <- df %>%
-      group_by(WA) %>%
-      slice_sample(n = 1) %>%
-      ungroup()
-
-    remaining_n <- min_inds - nrow(base_sample)
-
-    if (remaining_n > 0) {
-
-      df_remaining <- df %>%
-        filter(!geo_trip %in% base_sample$geo_trip)
-
-      extra_n <- min(remaining_n, nrow(df_remaining))
-
-      extra_sample <- df_remaining %>%
-        slice_sample(n = extra_n)
-
-      bind_rows(base_sample, extra_sample)
-
-    } else {
-      base_sample
-    }
-
-  }) %>%
-  pull(geo_trip)
-
-trips_final <- trips_balanced_ind %>%
-  filter(geo_trip %in% selected_ids)
-
-
-```
+# 3. Load Base Map & Colonies
 
 ---
-
-# 4. Calculate Group-Level KDE
-
-```{r kde-groups}
-# Convert to SpatialPointsDataFrame
-coords <- trips_final[, c("Lon", "Lat")]
-sp_df <- SpatialPointsDataFrame(
-  coords,
-  data = data.frame(Group = trips_final$Group),
-  proj4string = CRS("+proj=longlat +datum=WGS84")
-)
-
-# Calculate KDE by group
-kde_groups <- kernelUD(sp_df[, "Group"], h = "href", grid = GRID_RES, same4all = TRUE)
-
-# Extract contours
-ver_90 <- st_as_sf(getverticeshr(kde_groups, percent = 90))
-ver_50 <- st_as_sf(getverticeshr(kde_groups, percent = 50))
-
-# Rename ID column for consistency
-ver_90$Group <- ver_90$id
-ver_50$Group <- ver_50$id
-
-cat("Group-level KDE calculated successfully\n")
-```
-
----
-
-# 5. Load Base Map & Colonies
-
 ```{r basedata}
 # Base map
 wrld <- rworldmap::getMap(resolution = "high")
@@ -276,7 +190,7 @@ cat("Colonies data loaded:", nrow(origin_sf), "colonies\n")
 
 ---
 
-# 6. Calculate Individual Activity Centers
+# 4. Calculate Individual Centroids
 
 ```{r individual-centroids}
 # Define factor levels for consistent ordering
@@ -313,12 +227,10 @@ cat("Individual centers calculated:", nrow(individual_k5), "individuals\n")
 
 ---
 
-# 7. Set Factor Levels & Order Data
+# 5. Set Factor Levels & Order Data
 
 ```{r factor-ordering}
 # Define levels
-group_order <- c('WesternMost', 'Central-West', 'Central-East', 'EasternMost')
-
 # Apply to all objects
 origin_sf$Pop <- factor(origin_sf$Pop, levels = pop_order)
 origin_sf$Group <- factor(origin_sf$Group, levels = group_order)
@@ -326,91 +238,9 @@ origin_sf$Group <- factor(origin_sf$Group, levels = group_order)
 individual_k5$Pop <- factor(individual_k5$Pop, levels = pop_order)
 individual_k5$Group <- factor(individual_k5$Group, levels = group_order)
 
-ver_90$Group <- factor(ver_90$Group, levels = group_order)
-ver_50$Group <- factor(ver_50$Group, levels = group_order)
 ```
 
----
-
-# 8. Main Figure: Group-Level Distributions (Figure 2)
-
-```{r main-figure, fig.width=12, fig.height=10, dpi=600}
-# Panel labels
-panel_labels <- c(
-  'WesternMost' = "A",
-  'Central-West' = "B",
-  'Central-East' = "C",
-  'EasternMost' = "D"
-)
-
-colors <- c(
-  "Ibiza"          = mako(12)[1], 
-  "Mallorca"       = mako(12)[3], 
-  "Minorca"        = mako(12)[4], 
-  "France"         = mako(12)[5], 
-  "Sardinia"       = mako(12)[6], 
-  "Malta"          = mako(12)[7], 
-  "Croatia"        = mako(12)[9], 
-  "Greece"         = mako(12)[11]
-)
-
-p <- ggplot() +
-  # Layer 1: Group-level kernels (background)
-  geom_sf(data = ver_90, fill = "#355C7D", color = NA, alpha = 0.15) +
-  geom_sf(data = ver_50, fill = "#355C7D", color = NA, alpha = 0.3) +
-
-  # Layer 2: Base map
-  geom_sf(data = sf_wrld, fill = "gray60", color = "black", linewidth = 0.1) +
-
-  # Layer 3: Individual tracks
-  geom_sf(data = individual_k5, aes(color = Pop), size = 1.2, alpha = 0.7, show.legend = FALSE) +
-  
-  # Layer 4: Breeding colonies
-  geom_sf(data = origin_sf, aes(fill = Pop), size = 3, shape = 24, color = "black", stroke = 0.5) +
-
-  # Layer 5 and 6: Add white contour to Minorca data
-  geom_sf(data = subset(individual_k5, Pop == "Minorca"), 
-          aes(fill = Pop), shape = 21, color = "white", size = 1.2, stroke = 0.7, show.legend = FALSE) +
-  geom_sf(data = subset(origin_sf, Pop == "Minorca"), 
-          aes(fill = Pop), shape = 24, color = "white", size = 3, stroke = 1.0, show.legend = FALSE) +
-  # ==========================================
-
-  # Aesthetics
-  facet_wrap(~Group, ncol = 2, labeller = as_labeller(panel_labels)) +
-  scale_fill_manual(values = colors, name = "Population", drop = FALSE) +
-  scale_color_manual(values = colors, drop = FALSE) + # Mantiene tu escala original intacta
-  coord_sf(xlim = c(-15, 42), ylim = c(28, 50)) +
-  
-  theme_minimal() +
-  theme(
-    strip.text = element_text(face = "bold", size = 12, hjust = 0),
-    legend.position = "top",
-    legend.text = element_text(size = 12),
-    legend.title = element_text(size = 12),
-    panel.grid = element_blank()
-  )
-
-print(p)
-```
-
-```{r save-main-figure}
-ggsave(
-  filename = "outputs/Figure_2_NonBreeding_Panels.png",
-  plot = p,
-  device = "png",
-  width = 210,
-  height = 150,
-  units = "mm",
-  dpi = 600,
-  bg = "white"
-)
-
-cat("Main figure saved: Figure_2_NonBreeding_Panels.png\n")
-```
-
----
-
-# 9. Calculate Population-Level KDE
+# 6. Calculate Population-Level KDE
 
 ```{r kde-populations}
 # Ensure proper factor ordering for populations
@@ -446,7 +276,7 @@ cat("Population-level KDE calculated successfully\n")
 
 ---
 
-# 10. Supplementary Figure: Population-Level Distributions
+# 7. Supplementary Figure: Population-Level Distributions
 
 ```{r supplementary-figure, fig.width=12, fig.height=16}
 # Prepare annotation labels with sample sizes
