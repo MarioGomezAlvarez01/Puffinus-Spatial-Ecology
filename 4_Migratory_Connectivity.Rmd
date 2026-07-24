@@ -1,6 +1,4 @@
 ---
-title: "Migratory Connectivity Analysis"
-author: "Mario Gómez Álvarez"
 date: "`r Sys.Date()`"
 output:
   html_document:
@@ -31,12 +29,13 @@ Sys.setenv(TZ = 'GMT')
 ## Introduction
 
 This document estimates the strength of **migratory connectivity** (MC) for Mediterranean
-shearwaters at three hierarchical levels:
+shearwaters at different approaches:
 
 1. **Taxon level** — Balearic (PUFMAU) vs. Yelkouan (PUFYEL) shearwaters.
 2. **Biogeographical level** — Four biogeographic units (WesternMost, Central-West,
    Central-East, EasternMost).
-3. **Population level** — Individual breeding populations within each unit.
+3. **Population level** — Individual breeding populations within each unit or taxa.
+4. **Pairwise comparisons** between biogeographic units
 
 ---
 
