@@ -1,6 +1,4 @@
 ---
-title: "Earth Mover's Distance (EMD) and Geographic Correlations"
-author: "Your Name"
 date: "`r Sys.Date()`"
 output:
   html_document:
@@ -465,35 +463,6 @@ model_nonbreeding <- lm(emd ~ distance,
 cat("\n===== Non-Breeding Season Model =====\n")
 print(summary(model_nonbreeding))
 ```
-
-
----
-
-## Summary
-
-This workflow analyzes the relationship between Earth Mover's Distance (EMD) and geographic distance:
-
-### Key Steps:
-
-1. **EMD Calculation** - Compares habitat suitability distributions between population pairs
-2. **Geographic Distance** - Calculates minimum marine distance between colonies
-3. **Correlation Analysis** - Examines EMD-distance relationships by biogeographic unit and season
-4. **Statistical Models** - Linear models quantify significant relationships
-
-### Key Findings:
-
-- **Breeding vs Non-breeding**: Different EMD-distance relationships by season
-- **Biogeographic Units**: Within-unit comparisons vs. between-unit comparisons
-- **Taxa Differentiation**: PUFMAU vs. PUFYEL population divergence patterns
-
-### Output Files:
-
-- `plot_emd_dist.png` - Labeled population pairs with EMD-distance relationships
-
----
-
-*Last updated: `r Sys.Date()`*
-
 # Session Information
 
 ```{r session-info}
