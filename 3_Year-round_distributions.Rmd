@@ -1,6 +1,4 @@
 ---
-title: "Year-Round Distributions of Shearwaters Across Mediterranean Populations"
-author: "Mario Gómez Álvarez"
 date: "2026-03-24"
 output:
   html_document:
@@ -22,7 +20,7 @@ Sys.setenv(TZ = 'GMT')
 
 # Introduction
 
-This analysis presents year-round distributional patterns of tracked seabirds across four biogeographical regions of the Mediterranean Sea. We integrate individual-level movement data with population-level estimates to generate spatially-explicit density grids representative of the entire populations. The approach accounts for unequal sampling effort across populations and scales individual tracks to population-level estimates.
+This analysis presents year-round distributional patterns of tracked seabirds. We integrate individual-level movement data with population-level estimates to generate spatially-explicit density grids representative of the entire populations. The approach accounts for unequal sampling effort across populations and scales individual tracks to population-level estimates.
 
 ---
 
@@ -477,7 +475,7 @@ cat("✓ Figure generated successfully\n")
 ```{r export-figure}
 # Save high-resolution figure for publication
 ggsave(
-  filename = "outputs/Fig3_density_grid.png",
+  filename = "outputs/Fig_density_grid.png",
   plot = p_final,
   width = 210,   # A4 width in mm
   height = 210,  # Proportional height
