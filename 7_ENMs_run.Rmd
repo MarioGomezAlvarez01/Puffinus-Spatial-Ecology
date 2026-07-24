@@ -1,6 +1,4 @@
 ---
-title: "Environmental Niche Models (ENMs)"
-author: "Mario Gómez Álvarez"
 date: "`r Sys.Date()`"
 output:
   html_document:
