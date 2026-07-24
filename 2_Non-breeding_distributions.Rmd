@@ -1,6 +1,4 @@
 ---
-title: "Non-Breeding Distributions"
-author: "Mario Gómez Álvarez"
 date: "`r Sys.Date()`"
 output:
   html_document:
@@ -26,11 +24,8 @@ Sys.setenv(TZ = 'GMT')
 
 ## Introduction
 
-This analysis examines non-breeding spatial distributions of Mediterranean shearwaters (Balearic and Yelkouan) across the eight breeding populations. We employ kernel density estimation (KDE) to identify core (UD50%) and home range (UD90%) areas during the core non-breeding season (August-September).
+This analysis examines non-breeding spatial distributions of Mediterranean shearwaters (Balearic and Yelkouan) across the eight breeding populations. We employ kernel density estimation (KDE) to identify core (UD50%) and home range (UD90%) areas during the non-breeding season.
 
-### Data Standardization
-
-**Individual-level standardization**: Minimum 30 locations per individual track
 ---
 
 # Load Libraries & Set Parameters
@@ -354,7 +349,7 @@ print(figura_sup)
 
 ```{r save-sf}
 ggsave(
-  filename = "outputs/Supplementary_Figure_KDE_8Populations.png",
+  filename = "outputs/Supplementary_Figure_KDE_Populations.png",
   plot = figura_sup,
   device = "png",
   width = 210,
