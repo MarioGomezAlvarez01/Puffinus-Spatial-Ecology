@@ -1,7 +1,4 @@
 ---
-title: "Environmental Climatologies Preparation for ENM"
-subtitle: "Monthly climatology processing from daily grids - Breeding vs Non-Breeding"
-author: "Charlotte Lambert & Mario Gómez Álvarez"
 date: "`r Sys.Date()`"
 output:
   html_document:
