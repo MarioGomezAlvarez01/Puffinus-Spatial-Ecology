@@ -1,6 +1,4 @@
 ---
-title: "Partial Response Curves from ENM Models"
-author: "Your Name"
 date: "`r Sys.Date()`"
 output:
   html_document:
@@ -12,7 +10,7 @@ output:
 
 # Partial Response Curves from Ensemble Niche Models
 
-This script extracts and visualizes partial response curves from the fitted ENM models, showing how species responses vary with environmental variables across biogeographic units and seasons.
+This script extracts and visualizes partial response curves from the fitted ENM models, showing how predicted responses vary with environmental variables across biogeographic units and seasons.
 
 ---
 
@@ -274,36 +272,6 @@ ggsave("outputs/partial_effects.png",
 
 cat("Partial response curves plot saved")
 ```
-
----
-
-## Summary
-
-This workflow extracts and visualizes partial response curves from the fitted ENM models at the biogeographic Unit level:
-
-### Key Features:
-
-- **Partial Response Curves**: Show how species suitability responds to each environmental variable
-- **Confidence Intervals**: 95% confidence intervals (shaded areas) indicate uncertainty
-- **Biogeographic Comparison**: Four biogeographic units shown in different colors
-- **Seasonal Separation**: Breeding and non-breeding seasons analyzed separately
-- **Variable-Specific Predictors**: Different variables are relevant for each season
-
-### Output:
-
-- `partials.csv` - Raw partial effect data (scaled values)
-- `partial_effects.png` - Visualization of partial response curves
-
-### Variables Analyzed:
-
-**Breeding Season:** NPP_mean, SST_mean, SST_sd, SSS_mean, SSH_mean, SSH_sd
-
-**Non-Breeding Season:** SST_mean, SST_sd, SSS_mean, SSH_mean, SSH_sd
-
----
-
-*Last updated: `r Sys.Date()`*
-
 # Session Information
 
 ```{r session-info}
