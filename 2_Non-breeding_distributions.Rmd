@@ -228,11 +228,7 @@ cat("Individual centers calculated:", nrow(individual_k5), "individuals\n")
 # Define levels
 # Apply to all objects
 origin_sf$Pop <- factor(origin_sf$Pop, levels = pop_order)
-origin_sf$Group <- factor(origin_sf$Group, levels = group_order)
-
 individual_k5$Pop <- factor(individual_k5$Pop, levels = pop_order)
-individual_k5$Group <- factor(individual_k5$Group, levels = group_order)
-
 ```
 
 # 6. Calculate Population-Level KDE
