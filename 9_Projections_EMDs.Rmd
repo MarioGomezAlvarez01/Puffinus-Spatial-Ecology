@@ -295,7 +295,7 @@ cat("Marine distances calculated\n")
 ```{r merge_emd_distance}
 # Convert distance matrix to long format
 dist_df <- as.data.frame(distance.marine)
-dist_df$col1 <- colonies$pop
+dist_df$col1 <- colonies$Pop
 
 dist_long <- dist_df %>%
   pivot_longer(
@@ -305,7 +305,7 @@ dist_long <- dist_df %>%
   ) %>%
   mutate(
     col2_idx = as.integer(gsub("\\D", "", col2_idx)),
-    col2 = colonies$pop[col2_idx]
+    col2 = colonies$Pop[col2_idx]
   ) %>%
   dplyr::select(col1, col2, distance)
 
